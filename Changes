@@ -1,8 +1,184 @@
 This file documents the revision history for the Monitoring Webinterface Thruk.
 
 next:
+          - cleanup preferences popup
+          - add user profile page
+          - add timezone setting to users profile page
+          - add require_comments_for_disable_cmds option
+          - move broadcast into side navigation
+          - move important filters up (#792)
+          - support macros in action menu onclicks
+          - fix wrong number of backends (#809)
+          - fix custom variable filters (#816)
+          - deprecate shadownaemon
+          - renamed cli livecache cmd to lmd
+          - Broadcasts:
+            - add template checkbox
+            - add macro support
+          - Panorama:
+            - optionally show broadcasts in panorama dashboards
+            - make determing worst state for group/filter icons configurable
+            - add new configuration option 'default_state_order'
+            - add view permission option to icon widgets
+            - fix tab rotation
+          - Config Tool:
+            - make command line a textarea
+            - use separate edit sessions for each user
+            - fix adding custom variables from extra_custom_var
+          - Business Process:
+            - calculate results parallel if there are many bps
+            - add details link to each node
+            - add max_check_attempts to bp nodes
+
+2.20-2   Wed Mar 14 00:12:24 CET 2018
+          - add optional debug switch for admin users
+          - Config Tool:
+            - fix error when saving from raw edit
+
+2.20     Wed Mar  7 10:59:57 CET 2018
+          - add support for ipv6 livestatus backends (#753)
+          - add timeout for cookie authentication http sub request
+          - add filter to notifications and history page
+          - add filter to processinfo page
+          - add new 'problems_limit' config option
+          - support tls livestatus connections
+          - fix occasional wrong redirects on page reloads (#776)
+          - support unlimited backend section depth
+          - Business Process:
+            - fix save button in chrome (#786)
+            - fix displaying configured eventhandler
+          - LMD:
+            - only restart lmd on timeouts when neccessary
+            - support lmd federation mode
+            - support lmd tls livestatus connections
+          - Mobile:
+            - implement remote filtering
+            - add alerts and notifications button to extinfo page
+          - Logcache:
+            - speed up updates
+          - Panorama:
+            - save open tabs in cookies instead of the user profile
+            - add quick filter for dashboard dropdown
+          - Config Tool:
+            - fix adding custom variables
+
+2.18     Mon Dec 25 15:27:06 CET 2017
+          - add new option 'commandline_obfuscate_pattern'
+          - add python and go client to default cookie_auth_direct_agents
+          - combine recurring downtimes for the same time into a single cron entry
+          - fix listing service recurring downtimes (#766)
+          - fix excel export button (#765)
+          - Config Tool:
+            - show summary prompt if a post_obj_save_cmd is set
+          - Business Process:
+            - add weighted state example custom function
+            - add new configuration option 'favorite_custom_function'
+            - skip reloading core if objects have not changed
+          - Reports:
+            - add option to only send mails for specific thresholds
+            - add button to quickly create excel export reports
+            - fix listing outages during downtimes
+          - Logcache:
+            - fix importing logs from file (#751)
+            - fix issue with locking
+          - Panorama:
+            - add squares widget
+            - add user styles option to add generic styles usable in labels etc.
+            - add optional helper grid
+            - update extjs 4.2.2
+            - add label availability options
+            - fix moving watermark elements
+            - fix widgets display issue in IE11
+            - fix row height in status lists (#779)
+            - fix minemap header in chrome and IE (#782)
+          - Mobile:
+            - add config option to add additonal links on the home page
+
+2.16-2   Sun Aug 20 13:47:31 CEST 2017
+          - add json export to tac page
+          - add workaround for displaying wrong host current_check_attempt
+          - send commands in bulk of 100 each
+          - Business Process:
+            - change pre/post hooks arguments
+
+2.16     Tue Aug  8 21:18:40 CEST 2017
+          - xls exports: add column reordering
+          - action menus: add close_timeout option
+          - downtimes: verify if end date is after start date
+          - support cascaded http backends with lmd
+          - show lmd statistics to performance page
+          - broadcasts:
+            - show broadcasts optionally on the login page
+            - add optional annotation icon
+          - logcache:
+            - performance improvements for the import and update commands
+            - fix notifications filter by contact_name
+          - cli:
+            - cleanup cli module system
+            - add plugin cli command
+            - add bash completion
+          - Business Process:
+            - add input/output filter
+            - make references link recursive
+            - performance improvements for service status nodes
+            - add optional operator for status aggregation
+          - Panorama:
+            - fix business process widget refresh (#702)
+          - Config Tool:
+            - fix removing too many backends (#743)
+          - fix issue when mobile plugin is disabled (#731)
+
+2.14-2   Fri May  5 12:31:42 CEST 2017
+          - autocomplete custom variables values if exposed by show_custom_vars
+          - make custom variables available in host/service excel export
+          - write details into apache log on timeouts
+          - make contacts email address available in enviroment for hooks and scripts
+          - action menus: support confirmation dialogs
+          - logcache:
+            - performance improvements for the logcacheclean command
+          - fix filtering for empty custom variables
+          - fix problems favicon counter
+
+2.14     Tue Mar 28 10:09:25 CEST 2017
+          - add new Thruk2 theme
+          - add broadcast system
+          - support opening server actions in new tabs
+          - support service lists for recurring downtimes
+          - fix livestatus "Operator !~~ for lists not implemented." issue when having an empty search filter
+          - set contactgroups as REMOTE_USER_GROUPS into the environment for hooks and scripts
+          - add basic filters to notifications page (#692)
+          - fix macro expansion with recursive args (#658)
+          - fix forcing logcache to myisam (#691)
+          - fix login hook not running in background
+          - Business Process:
+            - add support for simple wildcards, ex.: host:*
+            - add link to all input hosts/services
+            - add link to referenced business process if node links to another bp
+            - support regular expressions in service details link
+            - fix dropdown not being clickable
+            - fix selecting nodes for edit (#682)
+          - Panorama View:
+            - honor acknowledgement and downtime status shape color calculation
+            - add option for fixed positioned popups
+            - fix shape color for host problems in group/dashboard panels
+            - fix saving column width for grid panels
+          - Reports:
+            - hide program messages from reports by default, can be changed back by report_include_class2 = 2
+            - fix email report links from the preferences popup being cut off
+            - fix html being cut off (#545)
+          - Statusmap:
+            - allow grouping by custom variable exposed by show_custom_vars
+
+2.12-3   Tue Dec 20 20:43:54 CET 2016
+          - fix js error on status page
+          - Config Tool:
+            - fix http backends when using lmd
+
+2.12-2   Mon Nov 28 14:49:12 CET 2016
+          - add downtime_max_duration option
           - fix glitch in column drag/drop
           - fix missing jquery in mobile view (#653)
+          - fix redirect issue when omd site is named 'thruk'
 
 2.12     Fri Nov 18 10:14:00 CET 2016
           - remove startup page, Thruk starts in less than a second now

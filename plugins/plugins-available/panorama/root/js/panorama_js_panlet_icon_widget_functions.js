@@ -26,64 +26,130 @@ TP.get_summarized_servicestatus = function(item) {
 /* returns group status */
 TP.get_group_status = function(options) {
     var group          = options.group,
+        order          = options.order,
         incl_svc       = options.incl_svc,
-        incl_hst       = options.incl_hst;
-        incl_ack       = options.incl_ack;
-        incl_downtimes = options.incl_downtimes;
-    var s;
-    var acknowledged = false;
-    var downtime     = false;
-    var hostProblem  = false;
+        incl_hst       = options.incl_hst,
+        incl_ack       = options.incl_ack, // alert acks as well, basically means acks are threated as unacked
+        incl_downtimes = options.incl_downtimes; // assume no downtime
+    if(!order) { order = default_state_order }
     if(group.hosts    == undefined) { group.hosts    = {} }
     if(group.services == undefined) { group.services = {} }
 
     var totals = { services: {}, hosts: {} };
     if(incl_svc) {
+        // since ok, crit,... contain the downtimes and acks as well, override with the plain_ ones.
         totals.services.ok       = group.services.plain_ok;;
         totals.services.critical = group.services.plain_critical;
         totals.services.warning  = group.services.plain_warning;
         totals.services.unknown  = group.services.plain_unknown;
         totals.services.pending  = group.services.plain_pending;
+        if(incl_ack) {
+            totals.services.critical += group.services.ack_critical;
+            totals.services.warning  += group.services.ack_warning;
+            totals.services.unknown  += group.services.ack_unknown;
+        }
+        if(incl_downtimes) {
+            totals.services.critical += group.services.downtime_critical;
+            totals.services.warning  += group.services.downtime_warning;
+            totals.services.unknown  += group.services.downtime_unknown;
+        }
     }
     if(incl_hst) {
         totals.hosts.up          = group.hosts.plain_up;
         totals.hosts.down        = group.hosts.plain_down;
         totals.hosts.unreachable = group.hosts.plain_unreachable;
         totals.hosts.pending     = group.hosts.plain_pending;
+        if(incl_ack) {
+            totals.hosts.down        = group.hosts.ack_down;
+            totals.hosts.unreachable = group.hosts.ack_unreachable;
+        }
+        if(incl_downtimes) {
+            totals.hosts.down        = group.hosts.downtime_down;
+            totals.hosts.unreachable = group.hosts.downtime_unreachable;
+        }
     }
 
-         if(incl_hst && totals.hosts.down        > 0)                            { s = 1; hostProblem = true; }
-    else if(incl_hst && totals.hosts.unreachable > 0)                            { s = 2; hostProblem = true; }
-    else if(incl_svc && totals.services.unknown > 0)                             { s = 3; }
-    else if(incl_svc && incl_ack && group.services.ack_unknown > 0)              { s = 3; }
-    else if(incl_svc && incl_downtimes && group.services.downtimes_unknown > 0)  { s = 3; }
-    else if(incl_ack && group.hosts.ack_unreachable > 0)                         { s = 2; }
-    else if(incl_ack && group.hosts.ack_down        > 0)                         { s = 2; }
-    else if(incl_hst && incl_downtimes && group.hosts.downtime_down        > 0)  { s = 1; hostProblem = true; }
-    else if(incl_hst && incl_downtimes && group.hosts.downtime_unreachable > 0)  { s = 2; hostProblem = true; }
-    else if(incl_svc && totals.services.critical > 0)                            { s = 2; }
-    else if(incl_svc && incl_ack && group.services.ack_critical > 0)             { s = 2; }
-    else if(incl_svc && incl_downtimes && group.services.downtimes_critical > 0) { s = 2; }
-    else if(incl_svc && totals.services.warning > 0)                             { s = 1; }
-    else if(incl_svc && incl_ack && group.services.ack_warning > 0)              { s = 1; }
-    else if(incl_svc && incl_downtimes && group.services.downtimes_warning > 0)  { s = 1; }
-    else                                                                         { s = 0; }
-    if(s == 0) {
-        var a = 0;
-             if(incl_hst && group.hosts.ack_down             > 0) { a = 1; acknowledged = true; hostProblem = true; }
-        else if(incl_hst && group.hosts.ack_unreachable      > 0) { a = 2; acknowledged = true; hostProblem = true; }
-        else if(incl_svc && group.services.ack_unknown       > 0) { a = 3; acknowledged = true; }
-        else if(incl_svc && group.services.ack_critical      > 0) { a = 2; acknowledged = true; }
-        else if(incl_svc && group.services.ack_warning       > 0) { a = 1; acknowledged = true; }
-
-        var d = 0;
-             if(incl_hst && group.hosts.downtime_down        > 0) { d = 1; downtime     = true; hostProblem = true; }
-        else if(incl_hst && group.hosts.downtime_unreachable > 0) { d = 2; downtime     = true; hostProblem = true; }
-        else if(incl_svc && group.services.downtimes_unknown > 0) { d = 3; downtime     = true; }
-        else if(incl_svc && group.services.downtime_critical > 0) { d = 2; downtime     = true; }
-        else if(incl_svc && group.services.downtime_warning  > 0) { d = 1; downtime     = true; }
-        s = Ext.Array.max([a,s,d]);
+    var s;
+    var acknowledged = false;
+    var downtime     = false;
+    var hostProblem  = false;
+    for(var x = 0; x < order.length; x++) {
+        switch (order[x]) {
+            case "down":
+                if(incl_hst && totals.hosts.down > 0)                 { s = 1; hostProblem = true; }
+                break;
+            case "unreachable":
+                if(incl_hst && totals.hosts.unreachable > 0)          { s = 2; hostProblem = true; }
+                break;
+            case "unknown":
+                if(incl_svc && totals.services.unknown > 0)           { s = 3; }
+                break;
+            case "acknowledged_unknown":
+                if(incl_svc && group.services.ack_unknown > 0)        { s = 3; acknowledged = true; }
+                break;
+            case "downtime_unknown":
+                if(incl_svc && group.services.downtime_unknown > 0)   { s = 3; downtime = true; }
+                break;
+            case "acknowledged_unreachable":
+                if(incl_hst && group.hosts.ack_unreachable > 0)       { s = 2; hostProblem = true; acknowledged = true; }
+                break;
+            case "acknowledged_down":
+                if(incl_hst && group.hosts.ack_down > 0)              { s = 1; hostProblem = true; acknowledged = true; }
+                break;
+            case "downtime_down":
+                if(incl_hst && group.hosts.downtime_down > 0)         { s = 1; hostProblem = true; downtime = true; }
+                break;
+            case "downtime_unreachable":
+                if(incl_hst && group.hosts.downtime_unreachable > 0)  { s = 2; hostProblem = true; downtime = true; }
+                break;
+            case "critical":
+                if(incl_svc && totals.services.critical > 0)          { s = 2; }
+                break;
+            case "acknowledged_critical":
+                if(incl_svc && group.services.ack_critical > 0)       { s = 2; acknowledged = true; }
+                break;
+            case "downtime_critical":
+                if(incl_svc && group.services.downtime_critical > 0)  { s = 2; downtime = true; }
+                break;
+            case "warning":
+                if(incl_svc && totals.services.warning > 0)           { s = 1; }
+                break;
+            case "acknowledged_warning":
+                if(incl_svc && group.services.ack_warning > 0)        { s = 1; acknowledged = true; }
+                break;
+            case "downtime_warning":
+                if(incl_svc && group.services.downtime_warning > 0)   { s = 1; downtime = true; }
+                break;
+            case "ok":
+                if(incl_svc && totals.services.ok > 0)                { s = 0; }
+                break;
+            case "up":
+                if(incl_hst && totals.hosts.up > 0)                   { s = 0; }
+                break;
+            case "downtime_up":
+                if(incl_hst && group.hosts.downtime_up > 0)           { s = 0; downtime = true; }
+                break;
+            case "downtime_ok":
+                if(incl_svc && group.services.downtime_ok > 0)        { s = 0; downtime = true; }
+                break;
+            case "pending":
+                if(incl_svc && totals.services.pending > 0)           { s = 4; }
+                if(incl_hst && totals.hosts.pending > 0)              { s = 4; hostProblem = true; }
+                break;
+            case "downtime_pending":
+                if(incl_svc && group.services.downtime_pending > 0)   { s = 4; downtime = true; }
+                if(incl_hst && group.hosts.downtime_pending > 0)      { s = 4; hostProblem = true; downtime = true; }
+                break;
+            default:
+                throw new Error("unhandled state: '"+order[x]+"'");
+                break;
+        }
+        // first hit sets the current overall state
+        if(s != undefined) {
+            break;
+        }
     }
+
     return({state: s, downtime: downtime, acknowledged: acknowledged, hostProblem: hostProblem });
 }
 
@@ -147,7 +213,9 @@ TP.iconClickHandlerDo = function(id) {
 }
 
 /* open link or special action for given link */
-TP.iconClickHandlerExec = function(id, link, panel, target) {
+TP.iconClickHandlerExec = function(id, link, panel, target, config, extraOptions) {
+    if(config       == undefined) { config       = {}; }
+    if(extraOptions == undefined) { extraOptions = {}; }
     var special = link.match(/dashboard:\/\/(.+)$/);
     var action  = link.match(/server:\/\/(.+)$/);
     var menu    = link.match(/menu:\/\/(.+)$/);
@@ -194,6 +262,7 @@ TP.iconClickHandlerExec = function(id, link, panel, target) {
             params:  params,
             method: 'POST',
             callback: function(options, success, response) {
+                if(extraOptions.callback) { extraOptions.callback(success, extraOptions); }
                 if(!success) {
                     if(response.status == 0) {
                         TP.Msg.msg("fail_message~~server action failed");
@@ -204,10 +273,10 @@ TP.iconClickHandlerExec = function(id, link, panel, target) {
                     var data = TP.getResponse(undefined, response);
                     if(data.rc == 0) {
                         if(data.msg != "") {
-                            TP.Msg.msg("success_message~~"+data.msg);
+                            TP.Msg.msg("success_message~~"+data.msg, config.close_timeout);
                         }
                     } else {
-                        TP.Msg.msg("fail_message~~"+data.msg);
+                        TP.Msg.msg("fail_message~~"+data.msg, config.close_timeout);
                     }
                 }
             }
@@ -215,55 +284,43 @@ TP.iconClickHandlerExec = function(id, link, panel, target) {
         return(false);
     }
     if(menu && menu[1]) {
-        var tmp = menu[1].split(/\//);
-        var menuName = tmp.shift();
-        var menuArgs = tmp;
-        var menuRaw;
-        Ext.Array.each(action_menu_items, function(val, i) {
-            var name    = val[0];
-            if(name == menuName) {
-                menuRaw = val[1];
-                return(false);
-            }
-        });
-        if(!menuRaw) {
-            TP.Msg.msg("fail_message~~no such menu: "+menu[1]);
+        var menuData = TP.parseActionMenuItemsStr(menu[1], id, panel, target, extraOptions);
+        if(!menuData) {
             return(false);
         }
-        var menuData  = Ext.JSON.decode(menuRaw);
-        var menuItems = [];
-        Ext.Array.each(menuData['menu'], function(i, x) {
-            if(Ext.isString(i)) {
-                menuItems.push(i);
-            } else {
-                menuItems.push({
-                    text:    i.label,
-                    icon:    replace_macros(i.icon),
-                    handler: function(This, evt) {
-                        if(i.target) {
-                            target = i.target;
-                        }
-                        return(TP.iconClickHandlerExec(id, i.action, panel, target));
-                    }
-                });
-            }
-        });
+        var autoOpen = false;
+        if(!Ext.isArray(menuData)) {
+            menuData = TP.parseActionMenuItems(menuData, id, panel, target, extraOptions);
+            autoOpen = true;
+        }
         TP.suppressIconTip = true;
-        Ext.create('Ext.menu.Menu', {
-            items: menuItems,
+        menu = Ext.create('Ext.menu.Menu', {
+            id: 'iconActionMenu',
+            items: menuData,
             listeners: {
                 beforehide: function(This) {
                     TP.suppressIconTip = false;
                     This.destroy();
+                },
+                move: function(This, x, y) {
+                    // somehow menu is place offset, even if showBy is called, force the location to our aligned element
+                    This.showBy(extraOptions.alignTo || panel);
                 }
-            }
-        }).showBy(panel);
+            },
+            cls: autoOpen ? 'hidden' : ''
+        }).showBy(extraOptions.alignTo || panel);
+        if(autoOpen) {
+            link = menu.items.get(0);
+            link.fireEvent("click");
+            menu.hide();
+        }
         return(false);
     }
     if(link) {
         if(!link.match(/\$/)) {
             // no macros, no problems
             TP.iconClickHandlerClickLink(panel, link, target);
+            if(extraOptions.callback) { extraOptions.callback(true, extraOptions); }
         } else {
             var tab = Ext.getCmp(panel.panel_id);
             Ext.Ajax.request({
@@ -277,6 +334,7 @@ TP.iconClickHandlerExec = function(id, link, panel, target) {
                 },
                 method: 'POST',
                 callback: function(options, success, response) {
+                    if(extraOptions.callback) { extraOptions.callback(success, extraOptions); }
                     if(!success) {
                         if(response.status == 0) {
                             TP.Msg.msg("fail_message~~could not replace macros");
@@ -299,6 +357,84 @@ TP.iconClickHandlerExec = function(id, link, panel, target) {
     return(true);
 };
 
+/* parse action menu from json string data */
+TP.parseActionMenuItemsStr = function(str, id, panel, target, extraOptions) {
+    var tmp = str.split(/\//);
+    var menuName = tmp.shift();
+    var menuArgs = tmp;
+    var menuRaw;
+    Ext.Array.each(action_menu_items, function(val, i) {
+        var name    = val[0];
+        if(name == menuName) {
+            menuRaw = val[1];
+            return(false);
+        }
+    });
+    if(!menuRaw) {
+        TP.Msg.msg("fail_message~~no such menu: "+str);
+        return(false);
+    }
+    var menuData;
+    try {
+        menuData  = Ext.JSON.decode(menuRaw);
+    } catch(e) {
+        TP.Msg.msg("fail_message~~menu "+str+": failed to parse json - "+e);
+        return(false);
+    }
+    if(!menuData['menu']) {
+        return(menuData);
+    }
+    return(TP.parseActionMenuItems(menuData['menu'], id, panel, target, extraOptions));
+}
+
+TP.parseActionMenuItems = function(items, id, panel, target, extraOptions) {
+    var menuItems = [];
+    Ext.Array.each(items, function(i, x) {
+        if(Ext.isString(i)) {
+            /* probably a separator, like '-' */
+            menuItems.push(i);
+        } else {
+            var menuItem = {
+                text:    i.label,
+                icon:    replace_macros(i.icon)
+            };
+            var handler = function(This, evt) {
+                if(i.target) {
+                    target = i.target;
+                }
+                return(TP.iconClickHandlerExec(id, i.action, panel, target, i, extraOptions));
+            };
+            var listeners = {};
+            for(var key in i) {
+                if(key != "icon" && key != "action" && key != "menu" && key != "label") {
+                    if(key.match(/^on/)) {
+                        var fn = new Function(i[key]);
+                        if(key == "onclick") {
+                            listeners[key.substring(2)] = function() {
+                                if(fn()) {
+                                    handler();
+                                }
+                            }
+                        } else {
+                            listeners[key.substring(2)] = fn;
+                        }
+                    } else {
+                        menuItem[key] = i[key];
+                    }
+                }
+            }
+            if(!i.onclick) {
+                //listeners["click"] = handler;
+                menuItem.handler = handler;
+            }
+            menuItem.listeners = listeners;
+            menuItems.push(menuItem);
+        }
+    });
+    return(menuItems);
+}
+
+
 TP.iconClickHandlerClickLink = function(panel, link, target) {
     var oldOnClick=panel.el.dom.onclick;
     panel.el.dom.onclick="";
@@ -310,7 +446,12 @@ TP.iconClickHandlerClickLink = function(panel, link, target) {
     panel.el.dom.click();
     window.setTimeout(function() {
         if(panel && panel.el) {
-            panel.el.dom.href=panel.xdata.link.link;
+            // restore original link
+            if(panel.xdata.link && panel.xdata.link.link) {
+                panel.el.dom.href=panel.xdata.link.link;
+            } else {
+                panel.el.dom.href="#";
+            }
             panel.el.dom.onclick=oldOnClick;
             panel.passClick = false;
         }
@@ -346,6 +487,9 @@ TP.getIconDetailsLink = function(panel, relativeUrl) {
         options.filter = cfg.filter;
         options.task   = 'redirect_status';
         base           = 'panorama.cgi';
+        if(!cfg.incl_svc) {
+            options.style = 'hostdetail';
+        }
     }
     else if(cfg.dashboard) {
         options.map    = cfg.dashboard;
@@ -353,12 +497,6 @@ TP.getIconDetailsLink = function(panel, relativeUrl) {
         relativeUrl    = true;
     } else {
         return('#');
-    }
-    if(panel.xdata.general.backends && panel.xdata.general.backends.length > 0) {
-        options.backends = panel.xdata.general.backends;
-    } else {
-        var tab = Ext.getCmp(panel.panel_id);
-        options.backends = tab.xdata.backends;
     }
     if(relativeUrl) {
         return(base+"?"+Ext.Object.toQueryString(options));
@@ -476,35 +614,32 @@ function availability(panel, opts) {
 }
 
 
-TP.iconMoveHandler = function(icon, x, y, noUpdateLonLat) {
-    window.clearTimeout(TP.timeouts['timeout_icon_move']);
-
+TP.iconMoveHandler = function(icon, x, y) {
     var deltaX = x - icon.xdata.layout.x;
     var deltaY = y - icon.xdata.layout.y;
     if(isNaN(deltaX) || isNaN(deltaY)) { return; }
+    if(deltaX == 0 && deltaY == 0) { return; }
 
-    /* update settings window */
+    // update settings window
     if(TP.iconSettingsWindow) {
-        /* layout tab */
-        TP.iconSettingsWindow.items.getAt(0).items.getAt(1).down('form').getForm().setValues({x:x, y:y});
-        /* appearance tab */
+        // layout tab
+        Ext.getCmp('layoutForm').getForm().setValues({x:x, y:y});
+        // appearance tab
         TP.skipRender = true;
-        TP.iconSettingsWindow.items.getAt(0).items.getAt(2).down('form').getForm().setValues({
+        Ext.getCmp('appearanceForm').getForm().setValues({
             connectorfromx: icon.xdata.appearance.connectorfromx + deltaX,
             connectorfromy: icon.xdata.appearance.connectorfromy + deltaY,
             connectortox:   icon.xdata.appearance.connectortox   + deltaX,
             connectortoy:   icon.xdata.appearance.connectortoy   + deltaY
         });
-        if(icon.dragEl1) { icon.dragEl1.suspendEvents(); icon.dragEl1.setPosition(icon.xdata.appearance.connectorfromx + deltaX, icon.xdata.appearance.connectorfromy + deltaY); icon.dragEl1.resumeEvents(); }
-        if(icon.dragEl2) { icon.dragEl2.suspendEvents(); icon.dragEl2.setPosition(icon.xdata.appearance.connectortox   + deltaX, icon.xdata.appearance.connectortoy   + deltaY); icon.dragEl2.resumeEvents(); }
         TP.skipRender = false;
     }
-    /* update label */
+    // update label
     if(icon.setIconLabel) {
-        icon.setIconLabel();
+        icon.setIconLabelPosition();
     }
 
-    /* moving with closed settings window */
+    // moving with closed settings window
     if(icon.stateful) {
         if(icon.setIconLabel) {
             if(!icon.locked) {
@@ -520,21 +655,25 @@ TP.iconMoveHandler = function(icon, x, y, noUpdateLonLat) {
             }
         }
 
-        /* move aligned items too */
+        // move aligned items too
         TP.moveAlignedIcons(deltaX, deltaY, icon.id);
     }
 
-    if(!noUpdateLonLat) {
-        icon.updateMapLonLat();
-    }
+    // update drag elements
+    if(icon.dragEl1) { icon.dragEl1.resetDragEl(); }
+    if(icon.dragEl2) { icon.dragEl2.resetDragEl(); }
+
+    icon.updateMapLonLat();
+    icon.saveState();
 }
 
 TP.moveAlignedIcons = function(deltaX, deltaY, skip_id) {
     if(!TP.moveIcons) { return; }
+    deltaX = Number(deltaX);
+    deltaY = Number(deltaY);
+    if(deltaX == 0 && deltaY == 0) { return; }
     Ext.Array.each(TP.moveIcons, function(item) {
         if(item.id != skip_id) {
-            deltaX = Number(deltaX);
-            deltaY = Number(deltaY);
             if(item.setIconLabel) {
                 item.suspendEvents();
                 item.xdata.layout.x = Number(item.xdata.layout.x) + deltaX;
@@ -575,8 +714,17 @@ TP.getShapeColor = function(type, panel, xdata, forceColor) {
     var p     = {};
     var perc  = 100;
     if(state == undefined) { state = panel.xdata.state; }
+
+    // host panels use warnings color for unreachable, just the label got changed in the settings menu
+    // all other panels must be mapped to service states because they can only define service colors
+    if(panel.iconType != 'host' && panel.hostProblem) {
+        if(state == 1) { state = 2 }
+    }
+
     if(xdata.appearance[type+"source"] == undefined) { xdata.appearance[type+"source"] = 'fixed'; }
     if(forceColor != undefined) { fillcolor = forceColor; }
+    else if(panel.acknowledged) { fillcolor = xdata.appearance[type+"color_ok"]; }
+    else if(panel.downtime)     { fillcolor = xdata.appearance[type+"color_ok"]; }
     else if(state == 0)         { fillcolor = xdata.appearance[type+"color_ok"]; }
     else if(state == 1)         { fillcolor = xdata.appearance[type+"color_warning"]; }
     else if(state == 2)         { fillcolor = xdata.appearance[type+"color_critical"]; }
@@ -657,12 +805,12 @@ TP.getShapeColor = function(type, panel, xdata, forceColor) {
 
 TP.evalInContext = function(js, context) {
     var restore = {};
-    for(key in context) { restore[key] = window[key]; window[key] = context[key]; }
+    for(var key in context) { restore[key] = window[key]; window[key] = context[key]; }
     var res, err;
     try {
         res = eval(js);
     } catch(e) { err = e; }
-    for(key in restore) {
+    for(var key in restore) {
         if(restore[key] == undefined) {
             delete(window[key]);
         } else {

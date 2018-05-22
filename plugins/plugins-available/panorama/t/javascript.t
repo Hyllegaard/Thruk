@@ -13,6 +13,7 @@ BEGIN {
     eval "use Test::JavaScript";
     plan skip_all => 'Test::JavaScript required' if $@;
     plan skip_all => 'backends required' if(!-s 'thruk_local.conf' and !defined $ENV{'PLACK_TEST_EXTERNALSERVER_URI'});
+    $ENV{'THRUK_QUIET'} = 1;
 }
 
 #################################################
@@ -33,6 +34,7 @@ var window = {
     getElementById:function(){},
     getElementsByTagName:function(t){
         if(t == 'html') {return([{}])};
+        if(t == 'script') {return([{src:'ext-all.js'}])};
         return([]);
     },
     documentElement:{
@@ -43,6 +45,12 @@ var window = {
     addEventListener: function(){},
     removeEventListener: function(){}
   },
+  DOMParser: function(){ return({
+    parseFromString: function(){ return({
+            getElementsByTagName:function(){ return([])},
+        })
+    }
+  })},
   location: {},
   addEventListener:    function(){},
   removeEventListener: function(){},
@@ -53,6 +61,7 @@ var window = {
 };
 var navigator  = window.navigator;
 var document   = window.document;
+DOMParser      = window.DOMParser;
 setTimeout     = function(){};
 clearTimeout   = function(){};
 setInterval    = function(){};
@@ -118,5 +127,13 @@ $tst = TestUtils::test_page(
 print $fh $tst->{'content'};
 close($fh);
 js_eval_ok($filename) && unlink($filename);
+
+#################################################
+# tests from javascript_tests file
+my @functions = read_file('t/xt/panorama/javascript_tests.js') =~ m/^\s*function\s+(test\w+)/gmx;
+js_eval_ok('t/xt/panorama/javascript_tests.js');
+for my $f (@functions) {
+    js_is("$f()", '1', "$f()");
+}
 
 done_testing();

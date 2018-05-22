@@ -114,6 +114,16 @@ sub get_processinfo {
 
 ##########################################################
 
+=head2 get_sites
+
+=cut
+
+sub get_sites {
+    return;
+}
+
+##########################################################
+
 =head2 get_can_submit_commands
 
 returns if this user is allowed to submit commands
@@ -501,6 +511,18 @@ sub renew_logcache {
     return;
 }
 
+##########################################################
+
+=head2 get_logs_start_end
+
+  get_logs_start_end
+
+returns first and last logfile entry
+
+=cut
+sub get_logs_start_end {
+    return;
+}
 
 =head1 AUTHOR
 

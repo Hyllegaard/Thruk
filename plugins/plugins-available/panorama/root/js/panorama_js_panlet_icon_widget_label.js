@@ -147,7 +147,8 @@ Ext.define('TP.IconLabel', {
 
     setIconLabelPosition: function(cfg) {
         var panel = this;
-        if(!panel.labelEl || !panel.labelEl.el) { return; }
+        if(!panel.labelEl || !panel.labelEl.el)     { return; }
+        if(!panel.size && panel.iconType != "text") { return; }
         if(cfg == undefined) { cfg = panel.xdata.label; }
         var left          = TP.extract_number_with_unit({ value: panel.el.dom.style.left, unit:'px',  floor: true, defaultValue: 100 });
         var top           = TP.extract_number_with_unit({ value: panel.el.dom.style.top,  unit:'px',  floor: true, defaultValue: 100 });
@@ -157,6 +158,9 @@ Ext.define('TP.IconLabel', {
         var elWidth       = TP.extract_number_with_unit({ value: panel.width,             unit:'',    floor: true, defaultValue:   0 });
         var elHeight      = TP.extract_number_with_unit({ value: panel.height,            unit:'',    floor: true, defaultValue:   0 });
         var bordersize    = TP.extract_number_with_unit({ value: cfg.bordersize,          unit:' px', floor: true, defaultValue:   0 });
+
+        // avoid flickering when not yet positioned correctly
+        if(elWidth == 0 && elHeight == 0 && left == 0 && top == 0) { return; }
 
         var el    = panel.labelEl.el.dom;
         var style = el.style;
@@ -248,13 +252,13 @@ Ext.define('TP.IconLabel', {
             panel:       panel,
             draggable:  !panel.locked,
             renderTo:  "iconContainer",
-            style:     { position: 'absolute' },
             shadow:     false,
             hidden:     (!TP.iconSettingsWindow && panel.xdata.label.display && panel.xdata.label.display == 'mouseover'),
             hideMode:  'visibility',
             cls:        ((panel.xdata.link && panel.xdata.link.link) ? '' : 'not') +'clickable iconlabel tooltipTarget', // defaults to text cursor otherwise
             style:      {
-                whiteSpace: 'nowrap'
+                whiteSpace: 'nowrap',
+                left:       '-1000px'    // hide initally before setIconLabelPosition moves it to the correct position
             },
             autoEl: {
                 tag:     'a',
@@ -275,14 +279,24 @@ Ext.define('TP.IconLabel', {
                         var newX = pos[0]+diffX;
                         var newY = pos[1]+diffY;
                         panel.setRawPosition(newX, newY);
+                        panel.updateMapLonLat(undefined, "center");
                         // update settings window
                         if(TP.iconSettingsWindow) {
                             Ext.getCmp('layoutForm').getForm().setValues({x:newX, y:newY});
-                        } else if(!panel.readonly) {
+                        }
+                        if(!panel.readonly) {
                             panel.xdata.layout.x = newX;
                             panel.xdata.layout.y = newY;
+                            if(panel.xdata.appearance.type == "connector" && panel.xdata.appearance.connectorfromx != undefined) {
+                                panel.xdata.appearance.connectorfromx += diffX;
+                                panel.xdata.appearance.connectorfromy += diffY;
+                                panel.xdata.appearance.connectortox   += diffX;
+                                panel.xdata.appearance.connectortoy   += diffY;
+                            }
                             panel.saveState();
                         }
+                        if(panel.dragEl1) { panel.dragEl1.resetDragEl(); }
+                        if(panel.dragEl2) { panel.dragEl2.resetDragEl(); }
                     }
                 },
                 boxready: function( This, width, height, eOpts ) {

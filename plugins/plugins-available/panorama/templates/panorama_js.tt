@@ -4,13 +4,12 @@ Ext.BLANK_IMAGE_URL = url_prefix+'plugins/panorama/images/s.gif';
 Ext.namespace("TP");
 [%+ IF state +%]
 var ExtState      = [% state %];
-var ExtStateSplit = false;
 [%+ ELSE +%]
 var ExtState      = [% dashboards %];
-var ExtStateSplit = true;
 [%+ END +%]
 var default_dashboard = [% default_dashboard %];
 var initial_shapes = [% json_encode(shapes) %];
+var default_state_order = [% json_encode(default_state_order) %];
 
 Ext.onReady(function() {
     /* create state provider */
@@ -55,7 +54,8 @@ Ext.onReady(function() {
             setActiveTab: function() {}
         });
         TP.add_pantab(one_tab_only, undefined, undefined, function(id) {
-            TP.initComplete();
+            // delay initComplete a bit, otherwise panlet cannot be added in readonly / single tab mode
+            TP.timeouts['timeout_set_initialized'] = window.setTimeout("TP.initComplete();", 30000);
             if(TP.initMask) { TP.initMask.destroy(); delete TP.initMask; }
         });
     } else {

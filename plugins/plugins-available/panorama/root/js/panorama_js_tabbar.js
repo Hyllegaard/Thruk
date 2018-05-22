@@ -138,6 +138,17 @@ Ext.define('TP.TabBar', {
                         icon:    url_prefix+'plugins/panorama/images/folder_picture.png',
                         handler: function() { TP.loadDashboardWindow() }
                     },
+                    '-',
+                    , {
+                        xtype:  'menucheckitem',
+                        text:   'Show Grid',
+                        id:     'show_helper_grid',
+                        handler: function(item, e) {
+                            var tabpan = Ext.getCmp('tabpan');
+                            var tab    = tabpan.getActiveTab();
+                            tab.setBackground(tab.xdata);
+                        }
+                    },
                     /* Exit */
                     '-',
                     {
@@ -185,7 +196,9 @@ Ext.define('TP.TabBar', {
         tabhead.addListener('click', function(This, eOpts) {
             var tabpan = Ext.getCmp('tabpan');
             var tab    = tabpan.getActiveTab();
-            tab.disableMapControlsTemp();
+            if(tab) {
+                tab.disableMapControlsTemp();
+            }
             var menu = Ext.create('Ext.menu.Menu', {
                 margin: '0 0 10 0',
                 items: [{
@@ -225,7 +238,9 @@ Ext.define('TP.TabBar', {
                 }],
                 listeners: {
                     beforehide: function(menu, eOpts) {
-                        tab.enableMapControlsTemp();
+                        if(tab) {
+                            tab.enableMapControlsTemp();
+                        }
                         menu.destroy();
                     }
                 }
@@ -283,22 +298,32 @@ Ext.define('TP.TabBar', {
         if(open_tabs.length == ordered_items.length) {
             open_tabs = ordered_items;
         }
-        var activeTab = this.getActiveTab();
-        if(!activeTab) {
-            debug("forced setting activeTab");
-            activeTab = this.setActiveTab(0);
-        }
-        activeTab = activeTab.getStateId();
-        this.open_tabs = open_tabs;
 
+        // save open tabs and active tab as cookie
+        if(TP.initialized) {
+            var activeTab = this.getActiveTab();
+            if(!activeTab) {
+                debug("forced setting activeTab");
+                activeTab = this.setActiveTab(open_tabs.length > 0 ? open_tabs[0] : 0);
+            }
+            cookieSave('thruk_panorama_active', (activeTab && activeTab.getStateId()) ? activeTab.getStateId().replace(/^tabpan-tab_/, '') : 0);
+            var numbers = [];
+            for(var nr=0; nr<open_tabs.length; nr++) {
+                var num = open_tabs[nr].replace(/^tabpan-tab_/, '');
+                if(num > 0) {
+                    numbers.push(num);
+                }
+            }
+            cookieSave('thruk_panorama_tabs', numbers.join(':'));
+        }
+
+        this.open_tabs = open_tabs;
         return {
-            open_tabs:  open_tabs,
-            xdata:      this.xdata,
-            activeTab:  activeTab
+            xdata: this.xdata
         }
     },
     applyState: function(state) {
-        TP.log('['+this.id+'] applyState: '+Ext.JSON.encode(state));
+        TP.log('['+this.id+'] applyState: '+(state ? Ext.JSON.encode(state) : 'none'));
         try {
             TP.initial_create_delay_active   = 0;    // initial delay of placing panlets (will be incremented in pantabs applyState)
             TP.initial_create_delay_inactive = 1000; // placement of inactive panlet starts delayed
@@ -309,14 +334,7 @@ Ext.define('TP.TabBar', {
                 if(state.activeTab && TP.initial_active_tab == undefined) {
                     TP.initial_active_tab = state.activeTab;
                 }
-                this.xdata = state.xdata;
-
-                // REMOVE AFTER: 01.01.2017
-                if(state.item_ids) {
-                    for(var nr=0; nr<state.item_ids.length; nr++) {
-                        TP.add_pantab(state.item_ids[nr], undefined, undefined, undefined, undefined, true);
-                    };
-                }
+                this.xdata = state.xdata || {};
 
                 if(state.open_tabs) {
                     for(var nr=0; nr<state.open_tabs.length; nr++) {
@@ -367,16 +385,6 @@ Ext.define('TP.TabBar', {
         TP.initComplete();
         this.stopTimeouts();
         TP.log('['+this.id+'] startTimeouts');
-
-        // REMOVE AFTER: 01.01.2017
-        delete this.xdata['refresh'];
-        delete this.xdata['autohideheader'];
-        delete this.xdata['backends'];
-        if(TP.reload_required) {
-            Ext.Msg.alert("Reload Required", "Internal storage format has changed. Page will reload automatically with the new format...");
-            TP.timeouts['timeout_'+this.id+'_window_reload'] = window.setTimeout(function() { TP.cp.saveChanges(false); window.location = 'panorama.cgi'; }, 3000);
-            return;
-        }
 
         var activeTab = this.getActiveTab();
         if(!activeTab) {
@@ -433,11 +441,17 @@ TP.load_dashboard_menu_items = function(menu, url, handler, all) {
                 } else {
                     TP.Msg.msg("fail_message~~adding new dashboard failed: "+response.status+' - '+response.statusText);
                 }
-            } else {
-                var data = TP.getResponse(undefined, response);
+                return;
+            }
+            var data = TP.getResponse(undefined, response);
+            menu.removeAll();
+            var found = 0;
+            if(data && data.data) {
                 data = data.data;
-                menu.removeAll();
-                var found = 0;
+                // add search bar
+                if(data.length > 10) {
+                    TP.addMenuSearchField(menu);
+                }
                 for(var x=0; x<data.length; x++) {
                     if(all || (!Ext.getCmp(data[x].id)) || !Ext.getCmp(data[x].id).rendered) {
                         found++;
@@ -449,12 +463,68 @@ TP.load_dashboard_menu_items = function(menu, url, handler, all) {
                         );
                     }
                 }
-                if(found == 0) {
-                    menu.add({text: 'none', disabled: true});
-                }
+            }
+            if(found == 0) {
+                menu.add({text: 'none', disabled: true});
             }
         }
     });
+}
+
+TP.addMenuSearchField = function(menu) {
+    var doFilter = function(This, newValue, oldValue, eOpts) {
+        TP.delayEvents(This, function() {
+            // create list of pattern
+            var searches = newValue.split(" ");
+            var cleaned  = [];
+            var pattern  = [];
+            for(var i=0; i < searches.length; i++) {
+                if(searches[i] != "") {
+                    cleaned.push(searches[i]);
+                    pattern.push(new RegExp(searches[i], 'gi'));
+                }
+            }
+            // reset if no search is done at all
+            if(cleaned.length == 0) {
+                menu.items.each(function(item, index, len) {
+                    if(item.origText) {
+                        item.setText(item.origText);
+                    }
+                    item.show();
+                });
+                return;
+            }
+            var replacePattern = new RegExp('('+cleaned.join('|')+')', 'gi');
+            menu.items.each(function(item, index, len) {
+                if(index == 0) { return; } // don't hide the search itself
+                if(!item.origText) {
+                    item.origText = item.text;
+                }
+                var found = true;
+                for(var i=0; i < pattern.length; i++) {
+                    if(!item.origText.match(pattern[i])) {
+                        found = false;
+                        break;
+                    }
+                }
+                if(found) {
+                    item.setText(item.origText.replace(replacePattern, '<b>$1</b>'));
+                    item.show();
+                } else {
+                    item.hide();
+                }
+            });
+        }, 300, 'menu_search_delay');
+    };
+    var searchField = {
+        xtype: 'textfield',
+        name: 'filter',
+        emptyText: 'filter dashboard list...',
+        listeners: {
+            change: doFilter
+        }
+    };
+    menu.add(searchField);
 }
 
 TP.getLogTab = function() {

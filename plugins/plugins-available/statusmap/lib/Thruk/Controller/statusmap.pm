@@ -28,7 +28,6 @@ sub index {
 
     if(!$c->config->{'statusmap_modules_loaded'}) {
         load Carp, qw/confess carp/;
-        load JSON::XS;
         load Data::Dumper, qw/Dumper/;
         load Encode, qw/decode_utf8/;
         $c->config->{'statusmap_modules_loaded'} = 1;
@@ -115,6 +114,11 @@ sub index {
         $json = _get_hosts_by_attribute($c, $hosts, 'servicegroups');
         $c->stash->{nodename} = 'Servicegroup';
     }
+    # order by custom variable
+    elsif($c->stash->{groupby} =~ /^cust:(.*)$/mx) {
+        $json = _get_hosts_by_attribute($c, $hosts, 'custom_variable', $1);
+        $c->stash->{nodename} = $1;
+    }
     else {
         confess("unknown groupby option: ".$c->stash->{groupby});
     }
@@ -124,10 +128,7 @@ sub index {
         $c->stash->{host} = 'rootid';
     }
 
-    #my $coder = JSON::XS->new->utf8->pretty;  # with indention (bigger and not valid js code)
-    my $coder = JSON::XS->new->utf8->shrink;   # shortest possible
-    $c->stash->{json}          = decode_utf8($coder->encode($json));
-
+    $c->stash->{json}          = $json;
     $c->stash->{title}         = 'Network Map';
     $c->stash->{page}          = 'statusmap';
     $c->stash->{style}         = 'statusmap';
@@ -302,9 +303,7 @@ sub _get_hosts_by_split_attribute {
 
 =cut
 sub _get_hosts_by_attribute {
-    my $c     = shift;
-    my $hosts = shift;
-    my $attr  = shift;
+    my($c, $hosts, $attr, $val) = @_;
 
     my $host_tree;
     for my $host (@{$hosts}) {
@@ -313,7 +312,10 @@ sub _get_hosts_by_attribute {
         $json_host->{'children'} = [];
         my $id = $json_host->{'id'};
 
-        $host->{$attr} = 'unknown' unless defined $host->{$attr};
+        $host->{$attr} = ['unknown'] unless defined $host->{$attr};
+        if($attr eq 'custom_variable') {
+            $host->{$attr} = [$json_host->{'data'}->{$val} // 'none'];
+        }
 
         # where should we put the host onto?
         for my $val (@{$host->{$attr}}) {
@@ -529,6 +531,12 @@ sub _get_json_host {
            $icon_image =~ s/"//gmx;
            $icon_image =~ s/'//gmx;
            $json_host->{'data'}->{'icon_image'} = $icon_image;
+    }
+    my $vars = Thruk::Utils::get_custom_vars($c, $host);
+    for my $custvar (@{$c->config->{'show_custom_vars'}}) {
+        my $name = $custvar;
+        $name =~ s/^_//gmx;
+        $json_host->{'data'}->{$custvar} = $vars->{$name} // 'none';
     }
     $c->{'all_nodes'}->{$host->{'name'}} = 1;
 

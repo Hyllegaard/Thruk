@@ -20,7 +20,9 @@ dailydist: cleandist
 	rm -f plugins/plugins-available/panorama/root/all_in_one-$(DAILYVERSIONFILES)_panorama.js \
 		root/thruk/javascript/all_in_one-$(DAILYVERSIONFILES).js \
 		themes/themes-available/Thruk/stylesheets/all_in_one-$(DAILYVERSIONFILES).css \
-		themes/themes-available/Thruk/stylesheets/all_in_one_noframes-$(DAILYVERSIONFILES).css
+		themes/themes-available/Thruk/stylesheets/all_in_one_noframes-$(DAILYVERSIONFILES).css \
+		themes/themes-available/Thruk2/stylesheets/all_in_one-$(DAILYVERSIONFILES).css \
+		themes/themes-available/Thruk2/stylesheets/all_in_one_noframes-$(DAILYVERSIONFILES).css
 	ls -la *.gz
 
 releasedist: cleandist dist
@@ -119,6 +121,8 @@ local_install: local_patches
 	cp -rp root/thruk/usercontent/* ${DESTDIR}${SYSCONFDIR}/usercontent/
 	cp -rp support/fcgid_env.sh ${DESTDIR}${DATADIR}/
 	chmod 755 ${DESTDIR}${DATADIR}/fcgid_env.sh
+	cp -rp support/thruk_authd.pl ${DESTDIR}${DATADIR}/
+	chmod 755 ${DESTDIR}${DATADIR}/thruk_authd.pl
 	cp -rp menu.conf ${DESTDIR}${DATADIR}/
 	cp -rp plugins/plugins-available ${DESTDIR}${DATADIR}/plugins/
 	cp -rp themes/themes-available ${DESTDIR}${DATADIR}/themes/
@@ -129,6 +133,7 @@ local_install: local_patches
 	cp -p script/html2pdf.js       ${DESTDIR}${DATADIR}/script/
 	cp -p script/html2pdf.sh       ${DESTDIR}${DATADIR}/script/
 	cp -p script/pnp_export.sh     ${DESTDIR}${DATADIR}/script/
+	cp -p support/convert_old_datafile.pl ${DESTDIR}${DATADIR}/script/convert_old_datafile
 	cp -p script/thruk_auth ${DESTDIR}${DATADIR}/
 	[ ! -f script/phantomjs ] || cp -p script/phantomjs ${DESTDIR}${DATADIR}/script/
 	echo " " > ${DESTDIR}${DATADIR}/dist.ini
@@ -158,6 +163,10 @@ local_install: local_patches
 	# logrotation
 	[ -z "${LOGROTATEDIR}" ] || { mkdir -p ${DESTDIR}${LOGROTATEDIR} && cp -p support/thruk.logrotate ${DESTDIR}${LOGROTATEDIR}/thruk-base && cd ${DESTDIR}${LOGROTATEDIR} && patch -p1 < $(shell pwd)/blib/replace/0006-logrotate.patch; }
 	############################################################################
+	# bash completion
+	[ -z "${BASHCOMPLDIR}" ] || { mkdir -p ${DESTDIR}${BASHCOMPLDIR} && cp -p support/thruk_bash_completion ${DESTDIR}${BASHCOMPLDIR}/thruk-base; }
+	############################################################################
+	############################################################################
 	# rc script
 	[ -z "${INITDIR}" ] || { mkdir -p ${DESTDIR}${INITDIR} && cp -p support/thruk.init ${DESTDIR}${INITDIR}/thruk; }
 	############################################################################
@@ -180,6 +189,7 @@ local_install: local_patches
 	############################################################################
 	# examples
 	cp -p examples/bp_functions.pm ${DESTDIR}${SYSCONFDIR}/bp/
+	cp -p examples/bp_filter.pm    ${DESTDIR}${SYSCONFDIR}/bp/
 
 quicktest:
 	TEST_AUTHOR=1 PERL_DL_NONLAZY=1 perl "-MExtUtils::Command::MM" "-e" "test_harness(0, 'inc', 'lib/')" \
@@ -199,36 +209,19 @@ timedtest:
 		fi; \
 	done
 
-DOCKERRESULTS=$(shell pwd)/t/docker/results/$(shell date +'%Y-%m-%d_%H.%M')
-DOCKERCMD=cd t/docker && \
-            docker run \
-                -p 5901:5901 \
-                $(shell [ -t 0 ] && echo '-ti') \
-                --rm \
-                -v $(shell pwd)/.:/src \
-                -v $(shell pwd)/t/docker/cases:/root/cases \
-                -v $(DOCKERRESULTS):/root/cases/_logs \
-                -v /etc/localtime:/etc/localtime
-t/docker/Dockerfile:
-	cp -p t/docker/Dockerfile.in t/docker/Dockerfile
-	cd t/docker && docker build -t="local/thruk_panorama_test" .
+scenariotest:
+	$(MAKE) test_scenarios
 
-dockerbuild:
-	rm -f t/docker/Dockerfile
-	$(MAKE) t/docker/Dockerfile
+test_scenarios:
+	cd t/scenarios && $(MAKE) test
 
-dockertest: t/docker/Dockerfile dockertestfirefox dockertestchrome
+e2etest:
+	cd t/scenarios/sakuli_e2e && $(MAKE) clean update prepare test
 
-dockertestchrome:
-	mkdir -p $(DOCKERRESULTS)
-	$(DOCKERCMD) local/thruk_panorama_test /root/failsafe.sh -browser chrome
-	rm -rf $(DOCKERRESULTS)
+rpm: $(NAME)-$(VERSION).tar.gz
+	rpmbuild -ta $(NAME)-$(VERSION).tar.gz
 
-dockertestfirefox:
-	mkdir -p $(DOCKERRESULTS)
-	$(DOCKERCMD) local/thruk_panorama_test /root/failsafe.sh -browser firefox
-	rm -rf $(DOCKERRESULTS)
-
-dockershell: t/docker/Dockerfile
-	mkdir -p $(DOCKERRESULTS)
-	$(DOCKERCMD) -it local/thruk_panorama_test /bin/bash
+deb: $(NAME)-$(VERSION).tar.gz
+	tar zxvf $(NAME)-$(VERSION).tar.gz
+	debuild -rfakeroot -i -us -uc -b
+	rm -rf $(NAME)-$(VERSION)

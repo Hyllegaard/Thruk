@@ -2,6 +2,7 @@ package Thruk::Controller::status;
 
 use strict;
 use warnings;
+use Cpanel::JSON::XS qw/decode_json/;
 
 =head1 NAME
 
@@ -70,6 +71,16 @@ sub index {
 
     if($c->req->parameters->{'replacemacros'}) {
         my($rc, $data) = _replacemacros($c);
+        if($c->req->parameters->{'forward'}) {
+            if(!$rc) {
+                return $c->redirect_to($data);
+            }
+            die("replacing macros failed");
+        }
+
+        if(!Thruk::Utils::check_csrf($c)) {
+            ($rc, $data) = (1, 'invalid request');
+        }
         my $json = { 'rc' => $rc, 'data' => $data };
         return $c->render(json => $json);
     }
@@ -166,7 +177,7 @@ sub _process_raw_request {
             }
             my $type = $c->req->parameters->{'type'};
             my $data;
-            if($type eq 'contact') {
+            if($type eq 'contact' || $type eq 'contacts') {
                 if(!$c->check_user_roles("authorized_for_configuration_information")) {
                     $data = ["you are not authorized for configuration information"];
                 } else {
@@ -176,6 +187,7 @@ sub _process_raw_request {
                             push @{$data}, $contact->{'name'} . ' - '.$contact->{'alias'};
                         }
                     }
+                    $data = Thruk::Utils::array_uniq($data);
                 }
             }
             elsif($type eq 'host' or $type eq 'hosts') {
@@ -213,29 +225,59 @@ sub _process_raw_request {
                     for my $d (@{$commands}) {
                         push @{$data}, $d->{'name'};
                     }
+                    $data = Thruk::Utils::array_uniq($data);
                 }
             }
-            elsif($type eq 'custom variable') {
-                if(!$c->check_user_roles("authorized_for_configuration_information")) {
-                    $data = ["you are not authorized for configuration information"];
-                } else {
-                    # get available custom variables
-                    $data        = [];
+            elsif($type eq 'custom variable' || $type eq 'custom value') {
+                # get available custom variables
+                $data        = [];
+                if($type eq 'custom variable' || !$c->check_user_roles("authorized_for_configuration_information")) {
                     my $vars     = {};
                     # we cannot filter for non-empty lists here, livestatus does not support filter like: custom_variable_names => { '!=' => '' }
                     # this leads to: Sorry, Operator  for custom variable lists not implemented.
                     my $hosts    = $c->{'db'}->get_hosts(    filter => [ Thruk::Utils::Auth::get_auth_filter( $c, 'hosts' ),  ], columns => ['custom_variable_names'] );
                     my $services = $c->{'db'}->get_services( filter => [ Thruk::Utils::Auth::get_auth_filter( $c, 'services' )], columns => ['custom_variable_names'] );
                     for my $obj (@{$hosts}, @{$services}) {
+                        next unless ref $obj->{custom_variable_names} eq 'ARRAY';
                         for my $key (@{$obj->{custom_variable_names}}) {
                             $vars->{$key} = 1;
                         }
                     }
                     @{$data} = sort keys %{$vars};
                     @{$data} = grep(/$filter/mx, @{$data}) if $filter;
+
+                    # filter all of them which are not listed by show_custom_vars unless we have extended permissions
+                    if(!$c->check_user_roles("authorized_for_configuration_information")) {
+                        my $newlist = [];
+                        my $allowed = Thruk::Utils::list($c->config->{'show_custom_vars'});
+                        for my $varname (@{$data}) {
+                            if(Thruk::Utils::check_custom_var_list($varname, $allowed)) {
+                                push @{$newlist}, $varname;
+                            }
+                        }
+                        $data = $newlist;
+                    }
+                }
+                if($type eq 'custom value') {
+                    my $allowed = $data;
+                    my $varname = $c->req->parameters->{'var'} || '';
+                    if(!$c->check_user_roles("authorized_for_configuration_information") && !grep/^\Q$varname\E$/mx, @{$allowed}) {
+                        $data = ["you are not authorized for this custom variable"];
+                    } else {
+                        my $uniq = {};
+                        my $hosts    = $c->{'db'}->get_hosts(    filter => [ Thruk::Utils::Auth::get_auth_filter( $c, 'hosts' ),    { 'custom_variable_names' => { '>=' => $varname } }], columns => ['custom_variable_names', 'custom_variable_values'] );
+                        my $services = $c->{'db'}->get_services( filter => [ Thruk::Utils::Auth::get_auth_filter( $c, 'services' ), { 'custom_variable_names' => { '>=' => $varname } }], columns => ['custom_variable_names', 'custom_variable_values'] );
+                        for my $obj (@{$hosts}, @{$services}) {
+                            my %vars;
+                            @vars{@{$obj->{custom_variable_names}}} = @{$obj->{custom_variable_values}};
+                            $uniq->{$vars{$varname}} = 1;
+                        }
+                        @{$data} = sort keys %{$uniq};
+                        @{$data} = grep(/$filter/mx, @{$data}) if $filter;
+                    }
                 }
             }
-            elsif($type eq 'contactgroup') {
+            elsif($type eq 'contactgroup' || $type eq 'contactgroups') {
                 $data = [];
                 if($c->req->parameters->{'wildcards'}) {
                     push @{$data}, '*';
@@ -244,6 +286,7 @@ sub _process_raw_request {
                 for my $g (@{$groups}) {
                     push @{$data}, $g->{'name'};
                 }
+                $data = Thruk::Utils::array_uniq($data);
             }
             elsif($type eq 'event handler') {
                 if(!$c->check_user_roles("authorized_for_configuration_information")) {
@@ -269,13 +312,20 @@ sub _process_raw_request {
                     push @{$data}, $b->{'name'};
                 }
                 @{$data} = sort @{$data};
+            }
+            elsif($type eq 'navsection') {
+                Thruk::Utils::Menu::read_navigation($c);
+                $data = [];
+                for my $section (@{$c->stash->{'navigation'}}) {
+                    push @{$data}, $section->{'name'};
+                }
             } else {
                 die("unknown type: " . $type);
             }
             my $json = [ { 'name' => $type."s", 'data' => $data } ];
             if($c->req->parameters->{'hash'}) {
                 my $total = scalar @{$data};
-                Thruk::Backend::Manager::_page_data(undef, $c, $data);
+                Thruk::Backend::Manager::page_data($c, $data);
                 my $list = [];
                 for my $d (@{$c->stash->{'data'}}) { push @{$list}, { 'text' => $d } }
                 $json = { 'data' => $list, 'total' => $total };
@@ -360,7 +410,6 @@ sub _process_search_request {
 
     # search pattern is in host param
     my $host = $c->req->parameters->{'host'};
-    $c->req->parameters->{'hidesearch'} = 2;    # force show search
 
     return ('detail') unless defined $host;
 
@@ -390,6 +439,7 @@ sub _process_details_page {
 
     my $view_mode = $c->req->parameters->{'view_mode'} || 'html';
     $c->stash->{'minimal'} = 1 if $view_mode ne 'html';
+    $c->stash->{'show_column_select'} = 1;
 
     my $has_columns = 0;
     my $user_data = Thruk::Utils::get_user_data($c);
@@ -475,7 +525,7 @@ sub _process_details_page {
     }
 
     if( $view_mode eq 'xls' ) {
-        Thruk::Utils::Status::set_selected_columns($c);
+        Thruk::Utils::Status::set_selected_columns($c, [''], 'service');
         $c->res->headers->header( 'Content-Disposition', 'attachment; filename="status.xls"' );
         $c->stash->{'data'}     = $services;
         $c->stash->{'template'} = 'excel/status_detail.tt';
@@ -509,6 +559,7 @@ sub _process_details_page {
 
     if($c->config->{'show_custom_vars'}
        and defined $c->stash->{'host_stats'}
+       and ref($c->stash->{'host_stats'}) eq 'HASH'
        and defined $c->stash->{'host_stats'}->{'up'}
        and $c->stash->{'host_stats'}->{'up'} + $c->stash->{'host_stats'}->{'down'} + $c->stash->{'host_stats'}->{'unreachable'} + $c->stash->{'host_stats'}->{'pending'} == 1) {
         # set allowed custom vars into stash
@@ -525,6 +576,7 @@ sub _process_hostdetails_page {
 
     my $view_mode = $c->req->parameters->{'view_mode'} || 'html';
     $c->stash->{'minimal'} = 1 if $view_mode ne 'html';
+    $c->stash->{'show_column_select'} = 1;
 
     my $has_columns = 0;
     my $user_data = Thruk::Utils::get_user_data($c);
@@ -594,7 +646,7 @@ sub _process_hostdetails_page {
     my $hosts = $c->{'db'}->get_hosts( filter => [ Thruk::Utils::Auth::get_auth_filter( $c, 'hosts' ), $hostfilter ], sort => { $backend_order => $sortoptions->{$sortoption}->[0] }, pager => 1, columns => $columns, extra_columns => $extra_columns );
 
     if( $view_mode eq 'xls' ) {
-        Thruk::Utils::Status::set_selected_columns($c);
+        Thruk::Utils::Status::set_selected_columns($c, [''], 'host');
         my $filename = 'status.xls';
         $c->res->headers->header( 'Content-Disposition', qq[attachment; filename="] . $filename . q["]);
         $c->stash->{'data'}     = $hosts;
@@ -762,7 +814,7 @@ sub _process_overview_page {
 
     my $sortedgroups = Thruk::Backend::Manager::_sort($c, [(values %joined_groups)], { 'ASC' => 'name'});
     Thruk::Utils::set_paging_steps($c, Thruk->config->{'group_paging_overview'});
-    Thruk::Backend::Manager::_page_data(undef, $c, $sortedgroups);
+    Thruk::Backend::Manager::page_data($c, $sortedgroups);
 
     return 1;
 }
@@ -836,7 +888,7 @@ sub _process_grid_page {
 
     my $sortedgroups = Thruk::Backend::Manager::_sort($c, [(values %joined_groups)], { 'ASC' => 'name'});
     Thruk::Utils::set_paging_steps($c, Thruk->config->{'group_paging_grid'});
-    Thruk::Backend::Manager::_page_data(undef, $c, $sortedgroups);
+    Thruk::Backend::Manager::page_data($c, $sortedgroups);
 
     $host_data     = undef;
     $services_data = undef;
@@ -897,45 +949,7 @@ sub _process_summary_page {
     # set defaults for all groups
     my $all_groups;
     for my $group ( @{$groups} ) {
-        $group->{'hosts_pending'}                      = 0;
-        $group->{'hosts_up'}                           = 0;
-        $group->{'hosts_down'}                         = 0;
-        $group->{'hosts_down_unhandled'}               = 0;
-        $group->{'hosts_down_downtime'}                = 0;
-        $group->{'hosts_down_ack'}                     = 0;
-        $group->{'hosts_down_disabled_active'}         = 0;
-        $group->{'hosts_down_disabled_passive'}        = 0;
-        $group->{'hosts_unreachable'}                  = 0;
-        $group->{'hosts_unreachable_unhandled'}        = 0;
-        $group->{'hosts_unreachable_downtime'}         = 0;
-        $group->{'hosts_unreachable_ack'}              = 0;
-        $group->{'hosts_unreachable_disabled_active'}  = 0;
-        $group->{'hosts_unreachable_disabled_passive'} = 0;
-
-        $group->{'services_pending'}                   = 0;
-        $group->{'services_ok'}                        = 0;
-        $group->{'services_warning'}                   = 0;
-        $group->{'services_warning_unhandled'}         = 0;
-        $group->{'services_warning_downtime'}          = 0;
-        $group->{'services_warning_prob_host'}         = 0;
-        $group->{'services_warning_ack'}               = 0;
-        $group->{'services_warning_disabled_active'}   = 0;
-        $group->{'services_warning_disabled_passive'}  = 0;
-        $group->{'services_unknown'}                   = 0;
-        $group->{'services_unknown_unhandled'}         = 0;
-        $group->{'services_unknown_downtime'}          = 0;
-        $group->{'services_unknown_prob_host'}         = 0;
-        $group->{'services_unknown_ack'}               = 0;
-        $group->{'services_unknown_disabled_active'}   = 0;
-        $group->{'services_unknown_disabled_passive'}  = 0;
-        $group->{'services_critical'}                  = 0;
-        $group->{'services_critical_unhandled'}        = 0;
-        $group->{'services_critical_downtime'}         = 0;
-        $group->{'services_critical_prob_host'}        = 0;
-        $group->{'services_critical_ack'}              = 0;
-        $group->{'services_critical_disabled_active'}  = 0;
-        $group->{'services_critical_disabled_passive'} = 0;
-        $all_groups->{ $group->{'name'} }              = $group;
+        $all_groups->{ $group->{'name'} } = Thruk::Utils::Status::summary_set_group_defaults($group);
     }
 
     if( $c->stash->{substyle} eq 'host' ) {
@@ -978,35 +992,7 @@ sub _process_summary_page {
                     $host_already_added{$group}->{ $service->{'host_name'} } = 1;
                 }
             }
-
-            $all_groups->{$group}->{'services_total'}++;
-
-            if( $service->{'has_been_checked'} == 0 ) { $all_groups->{$group}->{'services_pending'}++; }
-            elsif ( $service->{'state'} == 0 ) { $all_groups->{$group}->{'services_ok'}++; }
-            elsif ( $service->{'state'} == 1 ) { $all_groups->{$group}->{'services_warning'}++; }
-            elsif ( $service->{'state'} == 2 ) { $all_groups->{$group}->{'services_critical'}++; }
-            elsif ( $service->{'state'} == 3 ) { $all_groups->{$group}->{'services_unknown'}++; }
-
-            if( $service->{'state'} == 1 and $service->{'scheduled_downtime_depth'} > 0 ) { $all_groups->{$group}->{'services_warning_downtime'}++; }
-            if( $service->{'state'} == 1 and $service->{'acknowledged'} == 1 )            { $all_groups->{$group}->{'services_warning_ack'}++; }
-            if( $service->{'state'} == 1 and $service->{'checks_enabled'} == 0 and $service->{'check_type'} == 0 ) { $all_groups->{$group}->{'services_warning_disabled_active'}++; }
-            if( $service->{'state'} == 1 and $service->{'checks_enabled'} == 0 and $service->{'check_type'} == 1 ) { $all_groups->{$group}->{'services_warning_disabled_passive'}++; }
-            if( $service->{'state'} == 1 and $service->{'host_state'} > 0 )               { $all_groups->{$group}->{'services_warning_prob_host'}++; }
-            elsif ( $service->{'state'} == 1 and $service->{'checks_enabled'} == 1 and $service->{'host_state'} == 0 and $service->{'acknowledged'} == 0 and $service->{'scheduled_downtime_depth'} == 0 ) { $all_groups->{$group}->{'services_warning_unhandled'}++; }
-
-            if( $service->{'state'} == 2 and $service->{'scheduled_downtime_depth'} > 0 ) { $all_groups->{$group}->{'services_critical_downtime'}++; }
-            if( $service->{'state'} == 2 and $service->{'acknowledged'} == 1 )            { $all_groups->{$group}->{'services_critical_ack'}++; }
-            if( $service->{'state'} == 2 and $service->{'checks_enabled'} == 0 and $service->{'check_type'} == 0 ) { $all_groups->{$group}->{'services_critical_disabled_active'}++; }
-            if( $service->{'state'} == 2 and $service->{'checks_enabled'} == 0 and $service->{'check_type'} == 1 ) { $all_groups->{$group}->{'services_critical_disabled_passive'}++; }
-            if( $service->{'state'} == 2 and $service->{'host_state'} > 0 )               { $all_groups->{$group}->{'services_critical_prob_host'}++; }
-            elsif ( $service->{'state'} == 2 and $service->{'checks_enabled'} == 1 and $service->{'host_state'} == 0 and $service->{'acknowledged'} == 0 and $service->{'scheduled_downtime_depth'} == 0 ) { $all_groups->{$group}->{'services_critical_unhandled'}++; }
-
-            if( $service->{'state'} == 3 and $service->{'scheduled_downtime_depth'} > 0 ) { $all_groups->{$group}->{'services_unknown_downtime'}++; }
-            if( $service->{'state'} == 3 and $service->{'acknowledged'} == 1 )            { $all_groups->{$group}->{'services_unknown_ack'}++; }
-            if( $service->{'state'} == 3 and $service->{'checks_enabled'} == 0 and $service->{'check_type'} == 0 ) { $all_groups->{$group}->{'services_unknown_disabled_active'}++; }
-            if( $service->{'state'} == 3 and $service->{'checks_enabled'} == 0 and $service->{'check_type'} == 1 ) { $all_groups->{$group}->{'services_unknown_disabled_passive'}++; }
-            if( $service->{'state'} == 3 and $service->{'host_state'} > 0 )               { $all_groups->{$group}->{'services_unknown_prob_host'}++; }
-            elsif ( $service->{'state'} == 3 and $service->{'checks_enabled'} == 1 and $service->{'host_state'} == 0 and $service->{'acknowledged'} == 0 and $service->{'scheduled_downtime_depth'} == 0 ) { $all_groups->{$group}->{'services_unknown_unhandled'}++; }
+            Thruk::Utils::Status::summary_add_service_stats($all_groups->{$group}, $service);
         }
     }
 
@@ -1022,7 +1008,7 @@ sub _process_summary_page {
 
     my $sortedgroups = Thruk::Backend::Manager::_sort($c, [(values %{$all_groups})], { 'ASC' => 'name'});
     Thruk::Utils::set_paging_steps($c, Thruk->config->{'group_paging_summary'});
-    Thruk::Backend::Manager::_page_data(undef, $c, $sortedgroups);
+    Thruk::Backend::Manager::page_data($c, $sortedgroups);
 
     return 1;
 }
@@ -1034,14 +1020,16 @@ sub _process_combined_page {
     my( $c ) = @_;
 
     $c->stash->{hidetop}    = 1 unless $c->stash->{hidetop} ne '';
-    $c->stash->{hidesearch} = 1;
+    $c->stash->{show_substyle_selector} = 0;
+    $c->stash->{'show_column_select'}   = 1;
+    $c->stash->{show_top_pane}          = 0;
 
     my $view_mode = $c->req->parameters->{'view_mode'} || 'html';
 
     my $has_columns = 0;
     my $user_data = Thruk::Utils::get_user_data($c);
-    my $selected_hst_columns = $c->req->parameters->{'dfl_columns'} || $user_data->{'columns'}->{'hst'} || $c->config->{'default_host_columns'};
-    my $selected_svc_columns = $c->req->parameters->{'dfl_columns'} || $user_data->{'columns'}->{'hst'} || $c->config->{'default_host_columns'};
+    my $selected_hst_columns = $c->req->parameters->{'hst_columns'} || $user_data->{'columns'}->{'hst'} || $c->config->{'default_host_columns'};
+    my $selected_svc_columns = $c->req->parameters->{'svc_columns'} || $user_data->{'columns'}->{'svc'} || $c->config->{'default_service_columns'};
     $c->stash->{'show_host_attempts'} = defined $c->config->{'show_host_attempts'} ? $c->config->{'show_host_attempts'} : 1;
     $c->stash->{'default_columns'}->{'hst_'} = Thruk::Utils::Status::get_host_columns($c);
     $c->stash->{'default_columns'}->{'svc_'} = Thruk::Utils::Status::get_service_columns($c);
@@ -1051,8 +1039,8 @@ sub _process_combined_page {
     $c->stash->{'comments_by_host_service'}  = {};
     if($selected_hst_columns || $selected_svc_columns) {
         $has_columns = 1;
-        if($selected_hst_columns =~ m/comments/mx
-           || $selected_svc_columns =~ m/comments/mx
+        if(   ($selected_hst_columns && $selected_hst_columns =~ m/comments/mx)
+           || ($selected_svc_columns && $selected_svc_columns =~ m/comments/mx)
            || $c->req->parameters->{'autoShow'}) {
             Thruk::Utils::Status::set_comments_and_downtimes($c);
         }
@@ -1137,15 +1125,18 @@ sub _process_combined_page {
     $c->stash->{'hosts'} = $hosts;
     if( $sortoption == 6 and defined $hosts ) { @{ $c->stash->{'hosts'} } = reverse @{ $c->stash->{'hosts'} }; }
 
+    $c->stash->{'hosts_limit_hit'}    = 0;
+    $c->stash->{'services_limit_hit'} = 0;
+
     if( $view_mode eq 'xls' ) {
-        Thruk::Utils::Status::set_selected_columns($c);
+        Thruk::Utils::Status::set_selected_columns($c, ['host_', 'service_']);
         $c->res->headers->header( 'Content-Disposition', 'attachment; filename="status.xls"' );
         $c->stash->{'hosts'}     = $hosts;
         $c->stash->{'services'}  = $services;
         $c->stash->{'template'}  = 'excel/status_combined.tt';
         return $c->render_excel();
     }
-    if ( $view_mode eq 'json' ) {
+    elsif ( $view_mode eq 'json' ) {
         if(!$c->check_user_roles("authorized_for_configuration_information")) {
             # remove custom macro colums which could contain confidential informations
             for my $h (@{$hosts}) {
@@ -1164,6 +1155,17 @@ sub _process_combined_page {
             'services' => $services,
         };
         return $c->render(json => $json);
+    } else {
+        if($c->config->{problems_limit}) {
+            if(scalar @{$c->stash->{'hosts'}} > $c->config->{problems_limit} && !$c->req->parameters->{'show_all_hosts'}) {
+                $c->stash->{'hosts_limit_hit'}    = 1;
+                $c->stash->{'hosts'}              = [splice(@{$c->stash->{'hosts'}}, 0, $c->config->{problems_limit})];
+            }
+            if(scalar @{$c->stash->{'services'}} > $c->config->{problems_limit} && !$c->req->parameters->{'show_all_services'}) {
+                $c->stash->{'services_limit_hit'} = 1;
+                $c->stash->{'services'}           = [splice(@{$c->stash->{'services'}}, 0, $c->config->{problems_limit})];
+            }
+        }
     }
 
     # set audio file to play
@@ -1206,7 +1208,7 @@ sub _process_perfmap_page {
             $val =~ s/;.*$//gmxo;
             $val =~ s/,/./gmxo;
             $val =~ m/^([\d\.\-]+)(.*?)$/mx;
-            if(defined $1) {
+            if(defined $val && defined $1) { # $val && required, triggers unused var in t/086-Test-Vars.t otherwise
                 $svc->{'perf'}->{$key} = 1;
                 $keys->{$key} = 1;
                 $svc->{$key} = $1.$2;
@@ -1217,15 +1219,12 @@ sub _process_perfmap_page {
     }
 
     if( $view_mode eq 'xls' ) {
-        Thruk::Utils::Status::set_selected_columns($c);
-        $c->stash->{'last_col'} = chr(65+(scalar keys %{$keys})-1);
+        Thruk::Utils::Status::set_selected_columns($c, [''], 'service', ['Hostname', 'Service', 'Status', sort keys %{$keys}]);
         my $filename = 'performancedata.xls';
         $c->res->headers->header( 'Content-Disposition', qq[attachment; filename="] . $filename . q["] );
         $c->stash->{'name'}      = 'Performance';
-        $c->stash->{'data'}     = $data;
-        $c->stash->{'col_sel'}   = $c->stash->{'columns'};
-        $c->stash->{'col_tr'}    = { 'host_name' => 'Hostname', 'description' => 'Service', 'state' => 'Status' };
-        $c->stash->{'columns'}   = ['host_name', 'description', 'state', sort keys %{$keys}];
+        $c->stash->{'data'}      = $data;
+        $c->stash->{'col_tr'}    = { 'Hostname' => 'host_name', 'Service' => 'description', 'Status' => 'state' };
         $c->stash->{'template'}  = 'excel/generic.tt';
         return $c->render_excel();
     }
@@ -1253,7 +1252,7 @@ sub _process_perfmap_page {
     }
 
     $c->stash->{'perf_keys'} = $keys;
-    Thruk::Backend::Manager::_page_data(undef, $c, $data);
+    Thruk::Backend::Manager::page_data($c, $data);
 
     $c->stash->{'orderby'}  = $sortoption;
     $c->stash->{'orderdir'} = $order;
@@ -1379,15 +1378,16 @@ sub _process_bookmarks {
 ##########################################################
 # check for search results
 sub _process_verify_time {
-    my( $c ) = @_;
+    my($c) = @_;
 
-    my $verified = 'false';
+    my $verified;
     my $error    = 'not a valid date';
     my $time = $c->req->parameters->{'time'};
+    my $start;
     if(defined $time) {
         eval {
-            if(Thruk::Utils::_parse_date($c, $time)) {
-                $verified = 'true';
+            if($start = Thruk::Utils::_parse_date($c, $time)) {
+                $verified = 1;
             }
         };
         if($@) {
@@ -1398,7 +1398,48 @@ sub _process_verify_time {
         }
     }
 
-    my $json = { 'verified' => $verified, 'error' => $error };
+    my $duration = $c->req->parameters->{'duration'};
+    my $end;
+    if($verified && $duration) {
+        undef $verified;
+        eval {
+            if($end = Thruk::Utils::_parse_date($c, $duration)) {
+                $verified = 1;
+            }
+        };
+        if($@) {
+            $error = $@;
+            chomp($error);
+            $error =~ s/\ at .*?\.pm\ line\ \d+//gmx;
+            $error =~ s/^Date::Calc::Mktime\(\):\ //gmx;
+        }
+    }
+
+    # check for mixed up start/end
+    my $id = $c->req->parameters->{'duration_id'};
+    if($start && $end && $id && $id eq 'start_time') {
+        ($start, $end) = ($end, $start);
+    }
+
+    my $now = time();
+    if($start && $end && $start > $end) {
+        $error = 'End date must be after start date';
+        undef $verified;
+    }
+    elsif($start && $end && $end < $now) {
+        $error = 'End date must be in the future';
+        undef $verified;
+    }
+    elsif($start && $end && $c->config->{downtime_max_duration}) {
+        my $max_duration = Thruk::Utils::expand_duration($c->config->{downtime_max_duration});
+        my $duration = $end - $start;
+        if($duration > $max_duration) {
+            $error = 'Duration exceeds maximum<br>allowed value: '.Thruk::Utils::Filter::duration($max_duration);
+            undef $verified;
+        }
+    }
+
+    my $json = { 'verified' => $verified ? 'true' : 'false', 'error' => $error };
     return $c->render(json => $json);
 }
 
@@ -1438,8 +1479,6 @@ sub _process_set_default_columns {
 sub _replacemacros {
     my( $c ) = @_;
 
-    return(1, 'invalid request') unless Thruk::Utils::check_csrf($c);
-
     my $host    = $c->req->parameters->{'host'};
     my $service = $c->req->parameters->{'service'};
     my $data    = $c->req->parameters->{'data'};
@@ -1454,8 +1493,21 @@ sub _replacemacros {
     my $obj = $objs->[0];
     return(1, 'no such object') unless $obj;
 
+    if($c->req->parameters->{'dataJson'}) {
+        my $new       =  {};
+        my $overal_rc = 0;
+        my $data = decode_json($c->req->parameters->{'dataJson'});
+        for my $key (keys %{$data}) {
+            my($replaced, $rc) = $c->{'db'}->replace_macros($data->{$key}, {host => $obj, service => $service ? $obj : undef, skip_user => 1});
+            $new->{$key} = $replaced;
+            $overal_rc = $rc if $rc > $overal_rc;
+        }
+        return(!$overal_rc, $new);
+    }
+
     my($new, $rc) = $c->{'db'}->replace_macros($data, {host => $obj, service => $service ? $obj : undef, skip_user => 1});
     # replace_macros returns 1 on success, js expects 0 on success, so revert rc here
+
     return(!$rc, $new);
 }
 

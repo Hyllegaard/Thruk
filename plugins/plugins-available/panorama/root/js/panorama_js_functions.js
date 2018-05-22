@@ -46,12 +46,19 @@ var TP = {
 
     add_pantab: function(id, replace_id, hidden, callback, extraConf, skipAutoShow) {
         var tabpan = Ext.getCmp('tabpan');
+        if(id && Ext.isNumeric(String(id))) {
+            id = TP.nr2TabId(id);
+        }
 
         /* if previously added as hidden tab, destroy it and add it normal */
         if(id && Ext.getCmp(id)) {
             var tab = Ext.getCmp(id);
             if(!tab.rendered) {
                 tab.destroy();
+            } else {
+                // dont add same dashboard twice
+                debug("attemted to add dashboard twice");
+                return;
             }
         }
 
@@ -60,13 +67,15 @@ var TP = {
             extraConf = {map: {}};
         }
 
-        if(TP.dashboardsSettingWindow) {
-            TP.dashboardsSettingWindow.body.mask('loading...');
-        }
+        if(!hidden) {
+            if(TP.dashboardsSettingWindow) {
+                TP.dashboardsSettingWindow.body.mask('loading...');
+            }
 
-        if(one_tab_only) {
-            if(replace_id && id != replace_id) {
-                tabpan.getActiveTab().body.mask("loading");
+            if(one_tab_only) {
+                if(replace_id && id != replace_id) {
+                    tabpan.getActiveTab().body.mask("loading");
+                }
             }
         }
 
@@ -83,57 +92,61 @@ var TP = {
             newDashboard = true;
         }
         if(id && TP.cp.state[id] == undefined) {
+            if(!TP.initialized) {
+                // all initial tabs should have a state, if not, do not open that tab
+                return;
+            }
             /* fetch state info and add new tab as callback */
             Ext.Ajax.request({
                 url: 'panorama.cgi?task=dashboard_data',
                 method: 'POST',
-                params: { nr: id },
-                async: false,
+                params: { nr: id, hidden: hidden },
                 callback: function(options, success, response) {
-                    if(id != 'new') {
-                        id = TP.nr2TabId(id);
-                    }
                     if(!success) {
-                        if(response.status == 0) {
-                            TP.Msg.msg("fail_message~~adding new dashboard failed");
-                        } else {
-                            TP.Msg.msg("fail_message~~adding new dashboard failed: "+response.status+' - '+response.statusText);
+                        if(!hidden) {
+                            if(response.status == 0) {
+                                TP.Msg.msg("fail_message~~adding new dashboard failed");
+                            } else {
+                                TP.Msg.msg("fail_message~~adding new dashboard failed: "+response.status+' - '+response.statusText);
+                            }
                         }
                         tabpan.saveState();
-                    } else {
-                        var data = TP.getResponse(undefined, response);
-                        data = data.data;
-                        TP.log('['+id+'] dashboard_data: '+Ext.JSON.encode(data));
-                        if(data.newid) { id = data.newid; delete data.newid; }
-                        if(extraConf) {
-                            var tmp = Ext.JSON.decode(data[id]);
-                            Ext.apply(tmp.xdata, extraConf);
-                            data[id] = Ext.JSON.encode(tmp);
-                        }
-                        for(var key in data) {
-                            TP.cp.set(key, Ext.JSON.decode(data[key]));
-                        }
-                        if(TP.cp.state[id]) {
-                            if(!hidden) {
-                                TP.initial_active_tab = id; // set inital tab, so panlets will be shown
-                            }
-                            TP.add_pantab(id, replace_id, hidden);
-                            if(TP.dashboardsSettingWindow && TP.dashboardsSettingGrid && TP.dashboardsSettingGrid.getView) {
-                                TP.dashboardsSettingGrid.getView().refresh();
-                            }
-                        } else {
-                            TP.Msg.msg("fail_message~~adding new dashboard failed, no such dashboard");
-                            tabpan.saveState();
-                        }
+                        return;
                     }
+
+                    var data = TP.getResponse(undefined, response);
+                    data = data.data;
+                    TP.log('['+id+'] dashboard_data: '+Ext.JSON.encode(data));
+                    if(data && data.newid) { id = data.newid; delete data.newid; }
+                    if(extraConf) {
+                        var tmp = Ext.JSON.decode(data[id]);
+                        Ext.apply(tmp.xdata, extraConf);
+                        data[id] = Ext.JSON.encode(tmp);
+                    }
+                    for(var key in data) {
+                        TP.cp.set(key, Ext.JSON.decode(data[key]));
+                    }
+                    if(TP.cp.state[id]) {
+                        if(TP.dashboardsSettingWindow && TP.dashboardsSettingGrid && TP.dashboardsSettingGrid.getView) {
+                            TP.dashboardsSettingGrid.getView().refresh();
+                        }
+                    } else {
+                        if(!hidden) {
+                            TP.Msg.msg("fail_message~~adding new dashboard failed, no such dashboard");
+                        }
+                        tabpan.saveState();
+                    }
+
+                    if(!hidden) {
+                        TP.initial_active_tab = id; // set inital tab, so panlets will be shown
+                    }
+                    TP.add_pantab(id, replace_id, hidden, callback, extraConf, skipAutoShow);
 
                     /* disable lock for new dashboard */
                     if(newDashboard) {
                         Ext.getCmp(id).locked = false;
                         Ext.getCmp(id).setLock(false);
                     }
-
-                    if(callback) { callback(id); }
                 }
             });
             return;
@@ -143,6 +156,10 @@ var TP = {
         if(hidden) {
             Ext.create("TP.Pantab", {id: id, hidden: true});
         } else {
+            if(TP.initial_active_tab == undefined || one_tab_only) {
+                TP.initial_active_tab = id; // set inital tab, so panlets will be shown
+            }
+
             var tab = tabpan.add(new TP.Pantab({id: id}));
             if(!skipAutoShow) {
                 tab.show();
@@ -152,7 +169,7 @@ var TP = {
             if(tabpan.getTabBar) {
                 tabbar = tabpan.getTabBar();
                 for(var x=0; x<tabbar.items.items.length; x++) {
-                    if(tabbar.items.items[x].card.id == id) {
+                    if(tabbar.items.items[x].card && tabbar.items.items[x].card.id == id) {
                         tabPos = x;
                         break;
                     }
@@ -194,9 +211,9 @@ var TP = {
                     }
                 } else {
                     var replace_nr;
-                    var tabState = tabpan.getState();
-                    for(var x=0; x<tabState.open_tabs.length; x++) {
-                        if(tabState.open_tabs[x] == replace_id) {
+                    tabpan.getState(); // recalculate open tabs
+                    for(var x=0; x<tabpan.open_tabs.length; x++) {
+                        if(tabpan.open_tabs[x] == replace_id) {
                             replace_nr = x+1;
                         }
                     }
@@ -214,9 +231,6 @@ var TP = {
 
         /* set initial timestamp */
         Ext.getCmp(id).ts = TP.cp.state[id].ts;
-
-        /* save tabs state */
-        Ext.getCmp('tabpan').saveState();
 
         /* any callbacks? */
         if(callback) { callback(id); }
@@ -277,8 +291,6 @@ var TP = {
             config.type = state[config.conf.id].xdata.cls;
         }
         if(config.type == undefined) {
-            debug(config);
-            var err  = new Error("no type!");
             var text = "";
             try {
                 delete config['tb'];
@@ -286,8 +298,8 @@ var TP = {
             } catch(err) {
                 text = ""+err;
             }
+            var err  = new Error("no type in "+text);
             TP.logError("global", "noTypeException", err);
-            TP.log("[global] "+text);
             throw err;
         }
         // fake state (probably cloned)
@@ -760,21 +772,23 @@ var TP = {
 
         if(decoded.tabpan) {
             /* old export with all tabs*/
-            TP.cp.saveChanges(false);
-            Ext.Msg.confirm(
-                'Confirm Import',
-                'This is a complete import which will replace your current view with the exported one.<br>Your current open dashboards will be closed and can be added again afterwards.',
-                function(button) {
-                    if(button === 'yes') {
-                        tabpan.stopTimeouts();
-                        TP.cp.loadData(decoded, false);
-                        TP.cp.saveChanges(false, {replace: 1});
-                        Ext.MessageBox.alert('Success', 'Import Successful!<br>Please wait while page reloads...');
-                        TP.initialized = false; // prevents onUnload saving over our imported tabs
-                        TP.timeouts['timeout_window_reload'] = window.setTimeout("window.location.reload()", 1000);
+            TP.cp.saveChanges(undefined, function() {
+                Ext.Msg.confirm(
+                    'Confirm Import',
+                    'This is a complete import which will replace your current view with the exported one.<br>Your current open dashboards will be closed and can be added again afterwards.',
+                    function(button) {
+                        if(button === 'yes') {
+                            tabpan.stopTimeouts();
+                            TP.cp.loadData(decoded, false);
+                            TP.cp.saveChanges({replace: 1}, function() {
+                                Ext.MessageBox.alert('Success', 'Import Successful!<br>Please wait while page reloads...');
+                                TP.initialized = false; // prevents onUnload saving over our imported tabs
+                                TP.timeouts['timeout_window_reload'] = window.setTimeout("window.location.reload()", 1000);
+                            });
+                        }
                     }
-                }
-            );
+                );
+            });
         } else {
             /* new single tab export */
             var param = {
@@ -786,7 +800,6 @@ var TP = {
             conn.request({
                 url:    'panorama.cgi?state',
                 params:  param,
-                async:   true,
                 success: function(response, opts) {
                     /* allow response to contain cookie messages */
                     var resp = TP.getResponse(undefined, response, false);
@@ -837,6 +850,10 @@ var TP = {
                 }
             }
 
+            if(data && data.broadcasts) {
+                TP.showBroadcasts(data.broadcasts);
+            }
+
             if(data && !TP.already_reloading) {
                 if(data.server_version != undefined && thruk_version != data.server_version) {
                     TP.already_reloading = true;
@@ -851,7 +868,8 @@ var TP = {
             }
 
             if(data && data.dashboard_ts != undefined) {
-                for(var tab_id in data.dashboard_ts) {
+                for(var key in data.dashboard_ts) {
+                    var tab_id = TP.nr2TabId(key);
                     var tab = Ext.getCmp(tab_id);
                     if(!tab) {
                         // dashboard has been closed already
@@ -945,8 +963,7 @@ var TP = {
     /* rotate tabs once */
     rotateTabs: function() {
         var tabpan = Ext.getCmp('tabpan');
-        var state  = tabpan.getState();
-        var at     = state.activeTab;
+        var at     = tabpan.getActiveTab();
         // find next tab
         var found = false;
         var next  = undefined;
@@ -955,7 +972,7 @@ var TP = {
                 next = tab.id;
                 return false;
             }
-            if(tab.id == at) {
+            if(tab.id == at.id) {
                 found = true;
             }
         });
@@ -969,7 +986,7 @@ var TP = {
         });
         el.on("contextmenu", function(evt, el, o) {
             var tab = Ext.getCmp(tabId);
-            tab.contextmenu(evt, true);
+            tab.contextmenu(evt, true, true);
         });
     },
     /* sum list elements */
@@ -1073,11 +1090,6 @@ var TP = {
     /* called on body unload */
     unload: function() {
         TP.isUnloading = true;
-        try {
-            // try saving state
-            TP.cp.saveChanges(false);
-        }
-        catch(evt) {}
     },
     deleteDowntime: function(id, panelId, type) {
         var panel = Ext.getCmp(panelId);
@@ -1129,6 +1141,14 @@ var TP = {
         if(!TP.iconUpdateRunning) { TP.iconUpdateRunning = {}; }
         if(TP.iconUpdateRunning[tab.id]) { return; }
 
+        /* Delay update if not all icons are rendered yet.
+         * Those icons would be missing from getStatusReq()
+         */
+        if(id == undefined && tab.window_ids.length > 0 && TP.getAllPanel(tab).length < tab.window_ids.length) {
+            TP.updateAllIcons(tab, id, xdata, reschedule, callback);
+            return;
+        }
+
         var statusReq = TP.getStatusReq(tab, id, xdata);
         if(statusReq == undefined) {
             if(tab && tab.body && tab.mask) { Ext.getBody().unmask(); tab.mask = undefined; }
@@ -1138,7 +1158,7 @@ var TP = {
         var req = statusReq.req,
             ref = statusReq.ref;
 
-        TP.log('['+tab.id+'] updateAllIconsDo');
+        TP.log('['+tab.id+'] updateAllIconsDo'+(id ? ' (id: '+id+')' : ''));
         var params = {
             types:       Ext.JSON.encode(req),
             backends:    TP.getActiveBackendsPanel(tab),
@@ -1162,8 +1182,8 @@ var TP = {
                 if(!success) {
                     if(TP.refresh_errors == undefined) { TP.refresh_errors = 0; }
                     TP.refresh_errors++;
-                    /* ignore first error, maybe caused by a reload */
-                    if(TP.refresh_errors > 1) {
+                    /* ignore first errors, maybe caused by a reload */
+                    if(TP.refresh_errors > 2) {
                         if(response.status == 0) {
                             TP.Msg.msg("fail_message~~refreshing status failed");
                         } else {
@@ -1204,7 +1224,9 @@ var TP = {
                                         if(lastTrend) { data.hosts[x].trend = lastTrend; }
                                     }
 
+                                    delete ref.hosts[name][y]['no_data'];
                                     ref.hosts[name][y].host = data.hosts[x];
+                                    ref.hosts[name][y].lastState = state;
                                     ref.hosts[name][y].refreshHandler(state);
                                 }
                                 delete ref.hosts[name];
@@ -1218,6 +1240,7 @@ var TP = {
                             var state = data.hostgroups[x]['state'];
                             if(ref.hostgroups[name]) { // may be empty if we get the same hostgroup twice in a result
                                 for(var y=0; y<ref.hostgroups[name].length; y++) {
+                                    delete ref.hostgroups[name][y]['no_data'];
                                     ref.hostgroups[name][y].hostgroup = data.hostgroups[x];
                                     ref.hostgroups[name][y].refreshHandler();
                                 }
@@ -1232,6 +1255,7 @@ var TP = {
                             var state = data.servicegroups[x]['state'];
                             if(ref.servicegroups[name]) { // may be empty if we get the same servicegroup twice in a result
                                 for(var y=0; y<ref.servicegroups[name].length; y++) {
+                                    delete ref.servicegroups[name][y]['no_data'];
                                     ref.servicegroups[name][y].servicegroup = data.servicegroups[x];
                                     ref.servicegroups[name][y].refreshHandler();
                                 }
@@ -1255,7 +1279,9 @@ var TP = {
                                         if(lastTrend) { data.services[x].trend = lastTrend; }
                                     }
 
+                                    delete ref.services[hst][svc][y]['no_data'];
                                     ref.services[hst][svc][y].service = data.services[x];
+                                    ref.services[hst][svc][y].lastState = state;
                                     ref.services[hst][svc][y].refreshHandler(state);
                                 }
                                 delete ref.services[hst][svc];
@@ -1268,6 +1294,7 @@ var TP = {
                             var name = data.backends[key].name;
                             if(ref.sites[name]) {
                                 for(var x=0; x<ref.sites[name].length; x++) {
+                                    delete ref.sites[name][x]['no_data'];
                                     ref.sites[name][x].site = data.backends[key];
                                     ref.sites[name][x].refreshHandler();
                                 }
@@ -1278,9 +1305,9 @@ var TP = {
 
                     /* update all dashboard/map icons */
                     var delay = 1000;
-                    for(var d in ref.dashboards) {
-                        for(var x=0; x<ref.dashboards[d].length; x++) {
-                            var p = ref.dashboards[d][x];
+                    for(var key in ref.dashboards) {
+                        for(var x=0; x<ref.dashboards[key].length; x++) {
+                            var p = ref.dashboards[key][x];
                             p.refreshHandler(undefined, true);
                             var tab_id = 'tabpan-tab_'+p.xdata.general.dashboard;
                             var skipUpdate = false;
@@ -1296,7 +1323,7 @@ var TP = {
                                 delay = delay + 200;
                             }
                         }
-                        delete ref.dashboards[d];
+                        delete ref.dashboards[key];
                     }
 
                     /* mark remaining as unknown */
@@ -1305,6 +1332,7 @@ var TP = {
                         var name = keys[x];
                         for(var key in ref[name]) {
                             for(var y=0; y<ref[name][key].length; y++) {
+                                ref[name][key][y]['no_data'] = true;
                                 delete ref[name][key][y]['hostgroup'];
                                 delete ref[name][key][y]['host'];
                                 delete ref[name][key][y]['servicegroup'];
@@ -1319,6 +1347,7 @@ var TP = {
                     for(var key in ref.services) {
                         for(var key2 in ref.services[key]) {
                             for(var y=0; y<ref.services[key][key2].length; y++) {
+                                ref.services[key][key2][y]['no_data'] = true;
                                 ref.services[key][key2][y].refreshHandler(3);
                                 delete ref.services[key][key2][y]['service'];
                             }
@@ -1497,7 +1526,6 @@ var TP = {
             url: 'panorama.cgi?task=dashboard_update',
             method: 'POST',
             params: { nr: nr, action: 'update', field: field, value: value },
-            async: false,
             callback: function(options, success, response) {
                 if(!success) {
                     if(response.status == 0) {
@@ -1530,7 +1558,6 @@ var TP = {
             url: 'panorama.cgi?task=dashboard_data',
             method: 'POST',
             params: { nr: nr },
-            async: false,
             callback: function(options, success, response) {
                 if(!success) {
                     if(response.status == 0) {
@@ -1571,7 +1598,6 @@ var TP = {
                 url: 'panorama.cgi?task=dashboard_update',
                 method: 'POST',
                 params: { nr: nr, action: action },
-                async: false,
                 callback: function(options, success, response) {
                     if(!success) {
                         if(response.status == 0) {
@@ -1588,8 +1614,9 @@ var TP = {
                     }
                 }
             });
+            return false;
         }
-        if(action == 'edit') {
+        else if(action == 'edit') {
             TP.tabSettingsWindow(nr);
         }
         return false;
@@ -1600,6 +1627,9 @@ var TP = {
         var backends;
         if(panel && panel.xdata && panel.xdata.backends && panel.xdata.backends.length > 0) {
             backends = panel.xdata.backends;
+        }
+        else if(panel && panel.xdata && panel.xdata.general && panel.xdata.general.backends && panel.xdata.general.backends.length > 0 && (panel.xdata.general.backends.length != 1 || panel.xdata.general.backends[0] != "")) {
+            backends = panel.xdata.general.backends;
         }
         else if(tab.xdata.select_backends) {
             backends = tab.xdata.backends;
@@ -1714,7 +1744,7 @@ var TP = {
             return;
         }
         var group = TP.getTabTotals(tab);
-        var res = TP.get_group_status({ group: group, incl_svc: true, incl_hst: true, incl_ack: incl_ack, incl_downtimes: incl_downtimes});
+        var res = TP.get_group_status({ group: group, incl_svc: true, incl_hst: true, incl_ack: incl_ack, incl_downtimes: incl_downtimes, order: tab.xdata.state_order});
         return(res);
     },
     getTabTotals: function(tab) {
@@ -1739,7 +1769,7 @@ var TP = {
         }
         for(var nr=0; nr<panels.length; nr++) {
             var p = panels[nr];
-            if(p.iconType && p.xdata) {
+            if(p.iconType && p.xdata && p.iconType != "text" && p.iconType != "image") {
                 if(p.iconType == 'host' || p.hostProblem) {
                     group.hosts.total++;
                          if(p.xdata.state == 0) { group.hosts.up++; }
@@ -1804,6 +1834,10 @@ var TP = {
 
     /* renew dashboards on the fly */
     renewDashboardDo: function(tab) {
+        // reschedule if state provider is saving right now, this might result in race conditions
+        if(TP.cp.isSaving) {
+            return TP.renewDashboard(tab);
+        }
         TP.log('['+tab.id+'] renewDashboardDo');
         var duration = 1000;
         tab.renewInProgress = true;
@@ -1985,7 +2019,7 @@ var TP = {
         nr = "tabpan-tab_"+nr;
         return(nr);
     },
-    reduceDelayEvents: function(scope, callback, delay, timeoutName) {
+    reduceDelayEvents: function(scope, callback, delay, timeoutName, skipInitialRun) {
         var now = (new Date()).getTime();
         if(!scope) {
             /* probably out of scope already, run it a last time */
@@ -1995,7 +2029,7 @@ var TP = {
         if(!scope.lastEventRun)              { scope.lastEventRun = {}; }
         if(!scope.lastEventRun[timeoutName]) { scope.lastEventRun[timeoutName] = 0; }
         window.clearTimeout(TP.timeouts[timeoutName]);
-        if(now > scope.lastEventRun[timeoutName] + delay) {
+        if(now > scope.lastEventRun[timeoutName] + delay && !skipInitialRun) {
             scope.lastEventRun[timeoutName] = now;
             callback();
         } else {
@@ -2007,6 +2041,19 @@ var TP = {
                 }
             }, delay);
         }
+    },
+    /* calls function delayed and removes duplicate calls till then */
+    delayEvents: function(scope, callback, delay, timeoutName) {
+        if(!scope) {
+            /* out of scope already, nothing to do */
+            return;
+        }
+        window.clearTimeout(TP.timeouts[timeoutName]);
+        TP.timeouts[timeoutName] = window.setTimeout(function() {
+            if(scope) {
+                callback();
+            }
+        }, delay);
     },
     isThisTheActiveTab: function(panel) {
         var tabpan    = Ext.getCmp('tabpan');
@@ -2066,6 +2113,50 @@ var TP = {
             var color = val.replace(/^#/, '');
             colors[color] = 1;
         }
+    },
+    showBroadcasts: function(broadcasts) {
+        if(!broadcasts) { return; }
+        if(!TP.broadcasts) { TP.broadcasts = {}; }
+        if(!TP.broadcastCt) {
+            TP.broadcastCt = Ext.DomHelper.insertFirst(document.body, {id:'broadcast-div', 'class': "popup-msg"}, true);
+        }
+        var broadcast_list = {};
+        for(var x = 0; x < broadcasts.length; x++) {
+            var b   = broadcasts[x];
+            var id  = "broadcast_"+b.basefile.replace(/[^0-9a-z]/g, "");
+            var text = replace_macros(b.text, b.macros);
+            if(b.annotation) {
+                text = '<img src="'+url_prefix+'themes/'+theme+'/images/'+b.annotation+'.png" border="0" alt="warning" title="'+b.annotation+'" width="16" height="16" style="vertical-align: text-bottom; margin-right: 5px;">'+text;
+            }
+            if(TP.broadcasts[id]) {
+                broadcast_list[id] = TP.broadcasts[id];
+                // update text for existing broadcasts
+                Ext.get(id+"_content").update(text);
+                continue;
+            }
+            // create missing broadcasts
+            var msg = TP.Msg.msg("info_message~~<div id="+id+"_content>"+text+"</div>", 0, TP.broadcastCt, "Announcement", function() {
+                Ext.Ajax.request({
+                    url: 'broadcast.cgi',
+                    method: 'POST',
+                    params: {
+                        action:  'dismiss',
+                        panorama: 1,
+                        token:    user_token
+                    }
+                });
+                delete TP.broadcasts[id];
+            });
+            broadcast_list[id] = msg.id;
+        }
+        // remove exceeding broadcasts
+        for(var key in TP.broadcasts) {
+            if(!broadcast_list[key]) {
+                Ext.get(TP.broadcasts[key]).destroy();
+            }
+        }
+
+        TP.broadcasts = broadcast_list;
     }
 }
 TP.log('[global] starting');

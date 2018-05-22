@@ -13,7 +13,8 @@ JSON data renderer
 use strict;
 use warnings;
 use Carp qw/confess/;
-use JSON::XS ();
+use Cpanel::JSON::XS ();
+use Time::HiRes qw/gettimeofday tv_interval/;
 
 =head1 METHODS
 
@@ -33,6 +34,7 @@ sub register {
 =cut
 sub render_json {
     my($c, $data) = @_;
+    my $t1 = [gettimeofday];
     $c->stats->profile(begin => "render_json");
     my $encoder = $c->app->{'jsonencoder'} || _get_encoder($c);
     my $output = $encoder->encode($data);
@@ -40,13 +42,15 @@ sub render_json {
     $c->res->content_type('application/json;charset=UTF-8');
     $c->res->body($output);
     $c->stats->profile(end => "render_json");
+    my $elapsed = tv_interval($t1);
+    $c->stash->{'total_render_waited'} += $elapsed;
     return($output);
 }
 
 sub _get_encoder {
     my($c) = @_;
     $c->app->{'jsonencoder'} =
-        JSON::XS->new
+        Cpanel::JSON::XS->new
                 ->ascii
                 ->pretty
                 ->canonical             # sort hash keys, breaks panorama if not set
@@ -64,10 +68,10 @@ __END__
 
 =head1 DESCRIPTION
 
-This module renders L<JSON::XS> data.
+This module renders L<Cpanel::JSON::XS> data.
 
 =head1 SEE ALSO
 
-L<JSON::XS>.
+L<Cpanel::JSON::XS>.
 
 =cut

@@ -171,7 +171,7 @@ sub _process_comments_page {
                                                              );
 
     if( defined $view_mode and $view_mode eq 'xls' ) {
-        Thruk::Utils::Status::set_selected_columns($c);
+        Thruk::Utils::Status::set_selected_columns($c, ['host_', 'service_'], 'comment');
         $c->res->headers->header( 'Content-Disposition', 'attachment; filename="comments.xls"' );
         $c->stash->{'template'} = 'excel/comments.tt';
         return $c->render_excel();
@@ -220,7 +220,7 @@ sub _process_downtimes_page {
                                                                );
 
     if( defined $view_mode and $view_mode eq 'xls' ) {
-        Thruk::Utils::Status::set_selected_columns($c);
+        Thruk::Utils::Status::set_selected_columns($c, ['host_', 'service_'], 'downtime');
         $c->res->headers->header( 'Content-Disposition', 'attachment; filename="downtimes.xls"' );
         $c->stash->{'template'} = 'excel/downtimes.tt';
         return $c->render_excel();
@@ -267,7 +267,7 @@ sub _process_recurring_downtimes_page {
             'target'        => $target,
             'host'          => [split/\s*,\s*/mx,$host],
             'hostgroup'     => [split/\s*,\s*/mx,$hostgroup],
-            'service'       => $service,
+            'service'       => [split/\s*,\s*/mx,$service],
             'servicegroup'  => [split/\s*,\s*/mx,$servicegroup],
             'schedule'      => Thruk::Utils::get_cron_entries_from_param($c->req->parameters),
             'duration'      => $c->req->parameters->{'duration'}        || 5,
@@ -693,7 +693,15 @@ sub _process_process_info_page {
     return $c->detach('/error/index/1') unless $c->check_user_roles("authorized_for_system_information");
     my $view_mode = $c->req->parameters->{'view_mode'} || 'html';
     if($view_mode eq 'json') {
-        return $c->render(json => $c->stash->{'pi_detail'});
+        my $merged = {};
+        for my $name (qw/pi_detail backend_detail/) {
+            for my $key (keys %{$c->stash->{$name}}) {
+                for my $attr (keys %{$c->stash->{$name}->{$key}}) {
+                    $merged->{$key}->{$attr} = $c->stash->{$name}->{$key}->{$attr};
+                }
+            }
+        }
+        return $c->render(json => $merged);
     }
     return 1;
 }
@@ -708,6 +716,18 @@ sub _process_perf_info_page {
     if(    $c->check_user_roles("authorized_for_configuration_information")
        and $c->check_user_roles("authorized_for_system_information")) {
         my $apache = $c->req->parameters->{'apache'};
+
+        # autodetect omd apaches
+        if(scalar keys %{$c->config->{'apache_status'}} == 0 && $ENV{'OMD_ROOT'}) {
+            my $root      = $ENV{'OMD_ROOT'};
+            my($siteport) = (`grep CONFIG_APACHE_TCP_PORT $root/etc/omd/site.conf` =~ m/(\d+)/mx);
+            my($ssl)      = (`grep CONFIG_APACHE_MODE     $root/etc/omd/site.conf` =~ m/'(\w+)'/mx);
+            my $proto     = $ssl eq 'ssl' ? 'https' : 'http';
+            $c->config->{'apache_status'} = {
+                'Site'   => $proto.'://127.0.0.1:'.$siteport.'/server-status',
+                'System' => $proto.'://127.0.0.1/server-status',
+            };
+        }
 
         for my $name (keys %{$c->config->{'apache_status'}}) {
             push @{$c->stash->{'apache_status'}}, $name;
@@ -737,6 +757,13 @@ sub _process_perf_info_page {
         }
     }
 
+    # add lmd cache statistics
+    $c->stash->{'has_lmd'} = 0;
+    if($c->config->{'use_lmd_core'}) {
+        $c->stash->{'has_lmd'}   = 1;
+        $c->stash->{'lmd_stats'} = $c->{'db'}->lmd_stats($c);
+    }
+
     return 1;
 }
 
@@ -753,8 +780,9 @@ sub _process_grafana_page {
     my $width   = $c->req->parameters->{'width'}  || 800;
     my $height  = $c->req->parameters->{'height'} || 300;
     my $format  = $c->req->parameters->{'format'} || 'png';
+    my $title   = $c->req->parameters->{'disablePanelTitel'};
 
-    $c->res->body(Thruk::Utils::get_perf_image($c, $hst, $svc, $start, $end, $width, $height, $source, undef, $format));
+    $c->res->body(Thruk::Utils::get_perf_image($c, $hst, $svc, $start, $end, $width, $height, $source, undef, $format, !$title));
     $c->{'rendered'} = 1;
     if($format eq 'png') {
         $c->res->headers->content_type('image/png');

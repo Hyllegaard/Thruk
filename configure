@@ -20,6 +20,7 @@ my $options = {
   'thruk-group'     => `id -gn`,
   'httpd-conf'      => '',
   'logrotatedir'    => '',
+  'bashcompldir'    => '',
   'nocompress'      => 0,
   'quiet'           => 0,
 };
@@ -43,7 +44,8 @@ Getopt::Long::GetOptions (
    "with-logdir=s"          => \$options->{'logdir'},
    "with-htmlurl=s"         => \$options->{'htmlurl'},
    "with-httpd-conf=s"      => \$options->{'httpd-conf'},
-   "with-checkresultdir=s"  => \$options->{'with-checkresultdir'},
+   "with-checkresultdir=s"  => \$options->{'checkresultdir'},
+   "with-bashcompletedir=s" => \$options->{'bashcompldir'},
    "with-thruk-user=s"      => \$options->{'thruk-user'},
    "with-thruk-group=s"     => \$options->{'thruk-group'},
    "with-thruk-libs=s"      => \$options->{'thruk-libs'},
@@ -104,6 +106,7 @@ LOGROTATEDIR     = $options->{'logrotatedir'}
 LOGDIR           = $options->{'logdir'}
 HTMLURL          = $options->{'htmlurl'}
 HTTPDCONF        = $options->{'httpd-conf'}
+BASHCOMPLDIR     = $options->{'bashcompldir'}
 THRUKUSER        = $options->{'thruk-user'}
 THRUKGROUP       = $options->{'thruk-group'}
 THRUKLIBS        = $options->{'thruk-libs'}
@@ -113,6 +116,7 @@ THRUKCOMPRESS    = $options->{'compress'}
 EOT
 
 close($fh);
+unlink("Makefile");
 my $out = `yes n | $^X Makefile.PL 2>&1`;
 if(!-e "Makefile") {
     print "configure failed:\n\n";
@@ -135,6 +139,7 @@ exit if $options->{'quiet'};
 
 $options->{'httpd-conf'}    = '** not installed **' unless $options->{'httpd-conf'};
 $options->{'logrotatedir'}  = '** not installed **' unless $options->{'logrotatedir'};
+$options->{'bashcompldir'}  = '** not installed **' unless $options->{'bashcompldir'};
 print <<EOT;
 
 *************************************
@@ -162,7 +167,6 @@ print <<EOT;
   css/js compression = $options->{'compress'}
 
 now run
-  perl Makefile.PL
   make
   make install
 to install thruk with these settings.

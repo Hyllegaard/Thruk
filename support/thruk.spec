@@ -9,8 +9,8 @@
 %endif
 
 Name:          thruk
-Version:       2.12
-Release: 1
+Version:       2.20
+Release: 2
 License:       GPLv2+
 Packager:      Sven Nierlein <sven.nierlein@consol.de>
 Vendor:        Labs Consol
@@ -24,9 +24,9 @@ Source0:       %{fullname}.tar.gz
 BuildRoot:     %{_tmppath}/%{name}-%{version}-%{release}
 Group:         Applications/Monitoring
 BuildRequires: autoconf, automake, perl
-Summary:       Monitoring Webinterface for Nagios/Icinga and Shinken
+Summary:       Monitoring Webinterface for Nagios/Naemon/Icinga and Shinken
 AutoReqProv:   no
-BuildRequires: libthruk >= 2.00
+BuildRequires: libthruk >= 2.20
 Requires:      thruk-base = %{version}-%{release}
 Requires:      thruk-plugin-reporting = %{version}-%{release}
 %if 0%{?suse_version} < 1315
@@ -49,30 +49,27 @@ large installations.
 %package base
 Summary:     Thruk Gui Base Files
 Group:       Applications/System
-Requires:    libthruk >= 2.00
+Requires:    libthruk >= 2.20
 Requires(preun): libthruk
 Requires(post): libthruk
 Requires:    perl logrotate gd wget
 AutoReqProv: no
+
+#sles and opensuse
 %if %{defined suse_version}
 Requires:    apache2 apache2-mod_fcgid cron
-%else
-# rhel specific requirements
-# >=rhel7
-%if 0%{?el7}%{?fc20}%{?fc21}%{?fc22}
-BuildRequires: perl-ExtUtils-Install
+%endif
+
+# >=rhel7 and fedora
+%if 0%{?el7}%{?fedora}
+BuildRequires: perl(ExtUtils::Install)
 Requires: httpd mod_fcgid cronie
-%else
-# rhel6 specific requirements
+%endif
+
+# rhel6 requirements
 %if 0%{?el6}
-BuildRequires: perl-ExtUtils-MakeMaker
+BuildRequires: perl(ExtUtils::MakeMaker)
 Requires: httpd mod_fcgid cronie
-%else
-# rhel5 specific requirements (centos support no el5 tag)
-BuildRequires: perl-ExtUtils-MakeMaker
-Requires: httpd mod_fcgid
-%endif
-%endif
 %endif
 
 %description base
@@ -104,12 +101,22 @@ and event reporting.
     --with-initdir="%{_initrddir}" \
     --with-logdir="%{_localstatedir}/log/thruk" \
     --with-logrotatedir="%{_sysconfdir}/logrotate.d" \
+    --with-bashcompletedir="%{_sysconfdir}/bash_completion.d" \
     --with-thruk-user="%{apacheuser}" \
     --with-thruk-group="%{apachegroup}" \
     --with-thruk-libs="%{_libdir}/thruk/perl5" \
     --with-httpd-conf="%{_sysconfdir}/%{apachedir}/conf.d" \
     --with-htmlurl="/thruk"
 %{__make} %{?_smp_mflags} all
+
+# replace /usr/bin/env according to https://fedoraproject.org/wiki/Packaging:Guidelines#Shebang_lines
+sed -e 's%/usr/bin/env perl%/usr/bin/perl%' -i \
+    script/thruk_server.pl \
+    support/thruk_authd.pl \
+
+# this plugin is shipped separatly
+rm plugins/plugins-enabled/reports2
+
 
 %install
 %{__rm} -rf %{buildroot}
@@ -119,7 +126,7 @@ and event reporting.
     COMMAND_OPTS="" \
     INIT_OPTS=""
 mkdir -p %{buildroot}%{_localstatedir}/lib/thruk
-rm %{buildroot}%{_sysconfdir}/thruk/plugins/plugins-enabled/reports2
+
 # enable su logrotate directive if required
 %if 0%{?fedora} >= 16 || 0%{?rhel} >= 7 || 0%{?sles_version} >= 12
     sed -i -e 's/^.*#su/    su/' %{buildroot}/%{_sysconfdir}/logrotate.d/thruk-base
@@ -143,6 +150,7 @@ if [ -d /etc/thruk/ssi/. ]; then
   mkdir -p /tmp/thruk_update/ssi
   cp -rp /etc/thruk/ssi/* /tmp/thruk_update/ssi/
 fi
+
 exit 0
 
 %post base
@@ -193,8 +201,11 @@ exit 0
 %posttrans base
 # restore themes and plugins
 if [ -d /tmp/thruk_update/themes/. ]; then
+  # do not remove the new default theme
+  test -h /tmp/thruk_update/themes/Thruk2 || mv /etc/thruk/themes/themes-enabled/Thruk2 /etc/thruk/themes/themes-enabled/.Thruk2
   rm -f /etc/thruk/themes/themes-enabled/*
   cp -rp /tmp/thruk_update/themes/* /etc/thruk/themes/themes-enabled/
+  test -h /etc/thruk/themes/themes-enabled/.Thruk2 && mv /etc/thruk/themes/themes-enabled/.Thruk2 /etc/thruk/themes/themes-enabled/Thruk2
 fi
 if [ -d /tmp/thruk_update/plugins/. ]; then
   rm -f /etc/thruk/plugins/plugins-enabled/*
@@ -247,6 +258,7 @@ case "$*" in
     ;;
   1)
     # POSTUPDATE
+    /usr/bin/thruk -a livecachestop --local >/dev/null 2>&1
     rm -rf %{_localstatedir}/cache/thruk/*
     mkdir -p /var/cache/thruk/reports
     chown -R %{apacheuser}:%{apachegroup} /var/cache/thruk
@@ -308,6 +320,7 @@ exit 0
 %config(noreplace) %{_sysconfdir}/thruk/naglint.conf
 %config(noreplace) %{_sysconfdir}/thruk/log4perl.conf
 %config(noreplace) %{_sysconfdir}/logrotate.d/thruk-base
+%config(noreplace) %{_sysconfdir}/bash_completion.d/thruk-base
 %config(noreplace) %{_sysconfdir}/%{apachedir}/conf.d/thruk.conf
 %config(noreplace) %{_sysconfdir}/%{apachedir}/conf.d/thruk_cookie_auth_vhost.conf
 %{_datadir}/%{name}/plugins/plugins-available/business_process
@@ -341,6 +354,7 @@ exit 0
 %config(noreplace) %{_sysconfdir}/thruk/menu_local.conf
 %config(noreplace) %{_sysconfdir}/thruk/usercontent/
 %config(noreplace) %{_sysconfdir}/thruk/bp/bp_functions.pm
+%config(noreplace) %{_sysconfdir}/thruk/bp/bp_filter.pm
 %attr(0755,root,root) %{_datadir}/thruk/thruk_auth
 %attr(0755,root,root) %{_datadir}/thruk/script/thruk_fastcgi.pl
 %attr(0755,root,root) %{_datadir}/thruk/script/thruk.psgi
@@ -348,6 +362,7 @@ exit 0
 %attr(0644,root,root) %{_datadir}/thruk/script/html2pdf.js
 %attr(0755,root,root) %{_datadir}/thruk/script/html2pdf.sh
 %attr(0755,root,root) %{_datadir}/thruk/script/pnp_export.sh
+%attr(0755,root,root) %{_datadir}/thruk/script/convert_old_datafile
 %{_datadir}/thruk/root
 %{_datadir}/thruk/templates
 %{_datadir}/thruk/themes
@@ -358,6 +373,7 @@ exit 0
 %{_datadir}/thruk/dist.ini
 %{_datadir}/thruk/thruk_cookie_auth.include
 %attr(0755,root,root) %{_datadir}/thruk/fcgid_env.sh
+%attr(0755,root,root) %{_datadir}/thruk/thruk_authd.pl
 %doc %{_mandir}/man3/nagexp.3
 %doc %{_mandir}/man3/naglint.3
 %doc %{_mandir}/man3/thruk.3

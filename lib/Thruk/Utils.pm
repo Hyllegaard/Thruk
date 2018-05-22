@@ -23,6 +23,7 @@ use Time::HiRes qw/gettimeofday tv_interval/;
 use Thruk::Utils::IO ();
 use Digest::MD5 qw(md5_hex);
 use POSIX ();
+use Module::Load qw/load/;
 
 ##############################################
 =head1 METHODS
@@ -480,7 +481,7 @@ sub get_dynamic_roles {
     $user = $c->user unless defined $user;
 
     # is the contact allowed to send commands?
-    my($can_submit_commands,$alias,$data);
+    my($can_submit_commands,$alias,$data,$email);
     my $cached_data = defined $username ? $c->cache->get->{'users'}->{$username} : {};
     if(defined $cached_data->{'can_submit_commands'}) {
         # got cached data
@@ -494,7 +495,8 @@ sub get_dynamic_roles {
 
     if(defined $data) {
         for my $dat (@{$data}) {
-            $alias               = $dat->{'alias'}               if defined $dat->{'alias'};
+            $alias = $dat->{'alias'} if defined $dat->{'alias'};
+            $email = $dat->{'email'} if defined $dat->{'email'};
             if(defined $dat->{'can_submit_commands'} && (!defined $can_submit_commands || $dat->{'can_submit_commands'} == 0)) {
                 $can_submit_commands = $dat->{'can_submit_commands'};
             }
@@ -558,7 +560,7 @@ sub get_dynamic_roles {
     # roles could be duplicated
     $roles = array_uniq($roles);
 
-    return($roles, $can_submit_commands, $alias, $roles_by_group);
+    return($roles, $can_submit_commands, $alias, $roles_by_group, $email);
 }
 
 ########################################
@@ -579,16 +581,20 @@ sub set_dynamic_roles {
 
     $c->stats->profile(begin => "Thruk::Utils::set_dynamic_roles");
 
-    #my($roles, $can_submit_commands, $alias)...
-    my($roles, undef, $alias) = get_dynamic_roles($c, $username, $c->user);
+    my($roles, undef, $alias, undef, $email) = get_dynamic_roles($c, $username, $c->user);
 
     if(defined $alias) {
         $c->user->{'alias'} = $alias;
+    }
+    if(defined $email) {
+        $c->user->{'email'} = $email;
     }
 
     for my $role (@{$roles}) {
         push @{$c->user->{'roles'}}, $role;
     }
+
+    $c->user->{'roles'} = array_uniq($c->user->{'roles'});
 
     $c->stats->profile(end => "Thruk::Utils::set_dynamic_roles");
     return 1;
@@ -1001,8 +1007,6 @@ sub set_custom_vars {
     my $already_added = {};
     for my $test (@{$vars}) {
         for my $cust_name (sort keys %{$custom_vars}) {
-            next if defined $already_added->{$cust_name};
-            my $cust_value = $custom_vars->{$cust_name};
             my $found      = 0;
             if($test eq $cust_name or $test eq '_'.$cust_name) {
                 $found = 1;
@@ -1017,6 +1021,7 @@ sub set_custom_vars {
             next unless $found;
 
             # expand macros in custom vars
+            my $cust_value = $custom_vars->{$cust_name};
             if(defined $host and defined $service) {
                     #($cust_value, $rc)...
                     ($cust_value, undef) = $c->{'db'}->_replace_macros({
@@ -1033,20 +1038,50 @@ sub set_custom_vars {
             }
 
             # add to dest
-            $already_added->{$cust_name} = 1;
             my $is_host = defined $service ? 0 : 1;
             if($add_host) {
                 if($cust_name =~ s/^HOST//gmx) {
-                    $already_added->{$cust_name} = 1;
                     $is_host = 1;
                 }
             }
+            next if $already_added->{$cust_name};
+            $already_added->{$cust_name} = 1;
             push @{$c->stash->{$dest}}, [ $cust_name, $cust_value, $is_host ];
         }
     }
     return;
 }
 
+########################################
+
+=head2 check_custom_var_list
+
+  check_custom_var_list($varname, $allowed)
+
+returns true if custom variable name is in the list of allowed variable names
+
+=cut
+
+sub check_custom_var_list {
+    my($varname, $allowed) = @_;
+
+    $varname =~ s/^_//gmx;
+
+    for my $cust_name (@{$allowed}) {
+        $cust_name =~ s/^_//gmx;
+        if($varname eq $cust_name) {
+            return(1);
+        } else {
+            my $v = "".$varname;
+            next if CORE::index($v, '*') == -1;
+            $v =~ s/\*/.*/gmx;
+            if($cust_name =~ m/^$v$/mx) {
+                return(1);
+            }
+        }
+    }
+    return;
+}
 
 ########################################
 
@@ -1255,8 +1290,8 @@ save excel file by background job
 =cut
 
 sub logs2xls {
-    my($c) = @_;
-    Thruk::Utils::Status::set_selected_columns($c);
+    my($c, $type) = @_;
+    Thruk::Utils::Status::set_selected_columns($c, [''], ($type || 'log'));
     $c->stash->{'data'} = $c->{'db'}->get_logs(%{$c->stash->{'log_filter'}});
     savexls($c);
     return;
@@ -1333,7 +1368,7 @@ sub get_histou_url {
 
     for my $type (qw/action_url_expanded notes_url_expanded/) {
         next unless defined $obj->{$type};
-        if($obj->{$type} =~ m|histou\.js\?|mx) {
+        if($obj->{$type} =~ m%histou\.js\?|/grafana/%mx) {
             return($obj->{$type});
         }
     }
@@ -1387,18 +1422,19 @@ sub get_graph_url {
 
 =head2 get_perf_image
 
-  get_perf_image($c, $hst, $svc, $start, $end, $width, $height, $source, $resize_grafana_images, $format)
+  get_perf_image($c, $hst, $svc, $start, $end, $width, $height, $source, $resize_grafana_images, $format, $showtitle)
 
 return raw pnp/grafana image if possible.
 An empty string will be returned if no graph can be exported.
 
 =cut
 sub get_perf_image {
-    my($c, $hst, $svc, $start, $end, $width, $height, $source, $resize_grafana_images, $format) = @_;
+    my($c, $hst, $svc, $start, $end, $width, $height, $source, $resize_grafana_images, $format, $showtitle) = @_;
     my $pnpurl     = "";
     my $grafanaurl = "";
     $format        = 'png' unless $format;
     $svc           = ''    unless defined $svc;
+    $showtitle     = 1     unless defined $showtitle;
 
     my $custvars;
     if($svc) {
@@ -1422,11 +1458,16 @@ sub get_perf_image {
         $custvars   = Thruk::Utils::get_custom_vars($c, $hstdata->[0]);
     }
 
+    if(!$showtitle) {
+        $grafanaurl .= '&disablePanelTitle';
+    }
+
     $c->stash->{'last_graph_type'} = 'pnp';
     if($grafanaurl) {
         $c->stash->{'last_graph_type'} = 'grafana';
         $grafanaurl =~ s|/dashboard/|/dashboard-solo/|gmx;
         # grafana panel ids usually start at 1 (or 2 with old versions)
+        undef $source if(defined $source && $source eq 'null');
         $source = ($custvars->{'GRAPH_SOURCE'} || $c->config->{'grafana_default_panelId'} || '1') unless defined $source;
         $grafanaurl .= '&panelId='.$source;
         if($resize_grafana_images) {
@@ -1446,18 +1487,33 @@ sub get_perf_image {
 
     my $exporter = $c->config->{home}.'/script/pnp_export.sh';
     $exporter    = $c->config->{'Thruk::Plugin::Reports2'}->{'pnp_export'} if $c->config->{'Thruk::Plugin::Reports2'}->{'pnp_export'};
-    $exporter    = $c->config->{home}.'/script/grafana_export.sh' if $grafanaurl;
+    if($grafanaurl) {
+        $exporter = $c->config->{home}.'/script/grafana_export.sh';
+        $exporter = $c->config->{'Thruk::Plugin::Reports2'}->{'grafana_export'} if $c->config->{'Thruk::Plugin::Reports2'}->{'grafana_export'};
+    }
 
     if(!defined $end)   { $end   = time();       }
     if(!defined $start) { $start = $end - 86400; }
 
     # create fake session
     my $sessionid = get_fake_session($c);
-    local $ENV{PHANTOMJSOPTIONS} = '--cookie=thruk_auth,'.$sessionid.' --format='.$format;
+    local $ENV{PHANTOMJSSCRIPTOPTIONS} = '--cookie=thruk_auth,'.$sessionid.' --format='.$format;
+
+    # call login hook, because it might transfer our sessions to remote graphers
+    if($c->config->{'cookie_auth_login_hook'}) {
+        Thruk::Utils::IO::cmd($c, $c->config->{'cookie_auth_login_hook'});
+    }
+
     my($fh, $filename) = tempfile();
     CORE::close($fh);
     my $cmd = $exporter.' "'.$hst.'" "'.$svc.'" "'.$width.'" "'.$height.'" "'.$start.'" "'.$end.'" "'.($pnpurl||'').'" "'.$filename.'" "'.$source.'"';
     if($grafanaurl) {
+        if($ENV{'OMD_ROOT'}) {
+            my $site = $ENV{'OMD_SITE'};
+            if($grafanaurl =~ m|^https?://localhost/$site(/grafana/.*)$|mx) {
+                $grafanaurl = $c->config->{'omd_local_site_url'}.$1;
+            }
+        }
         $cmd = $exporter.' "'.$width.'" "'.$height.'" "'.$start.'" "'.$end.'" "'.$grafanaurl.'" "'.$filename.'"';
     }
     Thruk::Utils::IO::cmd($c, $cmd);
@@ -1594,6 +1650,26 @@ sub list {
 
 ########################################
 
+=head2 array_chunk
+
+  array_chunk($list, $number)
+
+return list of <number> evenly chunked parts
+
+=cut
+
+sub array_chunk {
+    my($list, $number) = @_;
+    my $chunks = [];
+    my $size = POSIX::floor(scalar @{$list} / $number);
+    while(my @chunk = splice( @{$list}, 0, $size+1 ) ) {
+        push @{$chunks}, \@chunk;
+    }
+    return($chunks);
+}
+
+########################################
+
 =head2 translate_host_status
 
   translate_host_status($status)
@@ -1610,6 +1686,33 @@ sub translate_host_status {
     return 'UNKNOWN';
 }
 
+##############################################
+
+=head2 expand_duration
+
+  expand_duration($value)
+
+returns expanded seconds from given abbreviation
+
+possible conversions are
+1w => 604800
+1d => 86400
+1h => 3600
+1m => 60
+
+=cut
+sub expand_duration {
+    my($value) = @_;
+    if($value =~ m/^(\d+)(y|w|d|h|m|s)/gmx) {
+        if($2 eq 'y') { return $1 * 86400*365; }# year
+        if($2 eq 'w') { return $1 * 86400*7; }  # weeks
+        if($2 eq 'd') { return $1 * 86400; }    # days
+        if($2 eq 'h') { return $1 * 3600; }     # hours
+        if($2 eq 'm') { return $1 * 60; }       # minutes
+        if($2 eq 's') { return $1 }             # seconds
+    }
+    return $value;
+}
 
 ##############################################
 
@@ -1624,6 +1727,7 @@ let the user choose a mobile page or not
 sub choose_mobile {
     my($c,$url) = @_;
 
+    return unless defined $c->config->{'use_feature_mobile'};
     return unless defined $c->req->header('user-agent');
     my $found = 0;
     for my $agent (split(/\s*,\s*/mx, $c->config->{'mobile_agent'})) {
@@ -1674,6 +1778,7 @@ sub update_cron_file {
     open(my $fh, '>>', $errorlog);
 
     if($c->config->{'cron_pre_edit_cmd'}) {
+        local $< = $> if $< == 0; # set real and effective uid to user, crontab will still be run as root on some systems otherwise
         my($fh2, $tmperror) = tempfile();
         Thruk::Utils::IO::close($fh2, $tmperror);
         my $cmd = $c->config->{'cron_pre_edit_cmd'}." 2>>".$tmperror;
@@ -1766,6 +1871,7 @@ sub update_cron_file {
     Thruk::Utils::IO::close($fh, $c->config->{'cron_file'});
 
     if($c->config->{'cron_post_edit_cmd'}) {
+        local $< = $> if $< == 0; # set real and effective uid to user, crontab will still be run as root on some systems otherwise
         my $cmd = $c->config->{'cron_post_edit_cmd'}." 2>>".$errorlog;
         my $output = `$cmd`;
         if ($? == -1) {
@@ -1947,36 +2053,42 @@ wait up to 60 seconds till the core responds
 
 sub wait_after_reload {
     my($c, $pkey, $time) = @_;
+    $c->stats->profile(begin => "wait_after_reload ($time)");
     $pkey = $c->stash->{'param_backend'} unless $pkey;
-    if(!$pkey && !$time) { sleep 5; }
+    my $start = time();
+    if(!$pkey && !$time) { sleep 3; }
 
     # wait until core responds again
-    my $start    = time();
     my $procinfo = {};
     my $done     = 0;
-    while($start > time() - 60) {
+    while($start > time() - 30) {
         $procinfo = {};
         eval {
             local $SIG{ALRM}   = sub { die "alarm\n" };
             local $SIG{'PIPE'} = sub { die "pipe error\n" };
-            alarm(10);
+            alarm(5);
             $c->{'db'}->reset_failed_backends();
             $procinfo = $c->{'db'}->get_processinfo(backend => $pkey);
         };
         alarm(0);
         if($@) {
+            $c->stats->profile(comment => "get_processinfo: ".$@);
             $c->log->debug('still waiting for core reload for '.(time()-$start).'s: '.$@);
         }
         elsif($pkey && $c->stash->{'failed_backends'}->{$pkey}) {
+            $c->stats->profile(comment => "get_processinfo: ".$c->stash->{'failed_backends'}->{$pkey});
             $c->log->debug('still waiting for core reload for '.(time()-$start).'s: '.$c->stash->{'failed_backends'}->{$pkey});
         }
         elsif($pkey and $time) {
             # not yet restarted
-            if($procinfo and $procinfo->{$pkey} and $procinfo->{$pkey}->{'program_start'} and $procinfo->{$pkey}->{'program_start'} < $time) {
-                $c->log->debug('still waiting for core reload for '.(time()-$start).'s, last restart: '.(scalar localtime($procinfo->{$pkey}->{'program_start'})));
-            } else {
-                $done = 1;
-                last;
+            if($procinfo and $procinfo->{$pkey} and $procinfo->{$pkey}->{'program_start'}) {
+                $c->stats->profile(comment => "core program_start: ".$procinfo->{$pkey}->{'program_start'});
+                if($procinfo->{$pkey}->{'program_start'} > $time) {
+                    $done = 1;
+                    last;
+                } else {
+                    $c->log->debug('still waiting for core reload for '.(time()-$start).'s, last restart: '.(scalar localtime($procinfo->{$pkey}->{'program_start'})));
+                }
             }
         }
         elsif($time) {
@@ -1985,6 +2097,7 @@ sub wait_after_reload {
                 for my $key (keys %{$procinfo}) {
                     if($procinfo->{$key}->{'program_start'} > $newest_core) { $newest_core = $procinfo->{$key}->{'program_start'}; }
                 }
+                $c->stats->profile(comment => "core program_start: ".$newest_core);
                 if($newest_core > $time) {
                     $done = 1;
                     last;
@@ -1996,8 +2109,13 @@ sub wait_after_reload {
             $done = 1;
             last;
         }
-        sleep(1);
+        if(time() - $start <= 5) {
+            Time::HiRes::sleep(0.3);
+        } else {
+            sleep(1);
+        }
     }
+    $c->stats->profile(end => "wait_after_reload ($time)");
     if($done) {
         # clean up cached groups which may have changed
         $c->cache->clear();
@@ -2047,16 +2165,15 @@ sub get_cron_entries_from_param {
 
 =head2 read_data_file
 
-  read_data_file($filename)
+  read_data_file($filename, [$c])
 
 return data for datafile
 
 =cut
 
 sub read_data_file {
-    my($filename) = @_;
+    my($filename, $c) = @_;
 
-    # just wrap the json writer and keep the rest to read old data files
     my $res;
     eval {
         $res = Thruk::Utils::IO::json_lock_retrieve($filename);
@@ -2064,30 +2181,12 @@ sub read_data_file {
     if(!$@ && $res) {
         return($res);
     }
-
-    # REMOVE AFTER: 01.01.2018
-    my $cont = read_file($filename);
-    $cont = Thruk::Utils::IO::untaint($cont);
-
-    # ensure right encoding
-    decode_any($cont);
-
-    $cont =~ s/^\$VAR1\ =\ //mx;
-
-    # replace broken escape sequences
-    $cont =~ s/\\x\{[\w]{5,}\}/\x{fffd}/gmxi;
-
-    # replace broken JSON::PP::Boolean
-    $cont =~ s/JSON::PP::/JSON::XS::/gmx;
-
-    my $VAR1;
-    ## no critic
-    eval("#line 1 $filename\n".'$VAR1 = '.$cont.';');
-    ## use critic
-
-    warn($@) if $@;
-
-    return $VAR1;
+    if($c) {
+        $c->log->warn("error loading $filename - ".$@);
+    } else {
+        warn("error loading $filename - ".$@);
+    }
+    return;
 }
 
 ##############################################
@@ -2159,6 +2258,7 @@ sub decode_any {
     eval { $_[0] = decode( "utf8", $_[0], Encode::FB_CROAK ) };
     if($@) { # input was not utf8
         return($_[0]) if $@ =~ m/\QCannot decode string with wide characters\E/mxo; # since Encode.pm 2.53 decode_utf8 no longer noops when utf8 is already on
+        return($_[0]) if $@ =~ m/\QWide character at\E/mxo;                         # since Encode.pm ~2.90 message changed
         $_[0] = decode( "iso-8859-1", $_[0], Encode::FB_WARN );
     }
     return $_[0];
@@ -2612,6 +2712,147 @@ sub _parse_date {
         }
     }
     return $timestamp;
+}
+
+########################################
+
+=head2 convert_wildcards_to_regex
+
+    convert_wildcards_to_regex($string)
+
+returns regular expression with wildcards replaced
+
+=cut
+sub convert_wildcards_to_regex {
+    my($str) = @_;
+    $str =~ s/^\*/.*/gmx;
+    return($str);
+}
+
+##############################################
+
+=head2 find_modules
+
+    find_modules($pattern)
+
+returns list of found modules
+
+=cut
+sub find_modules {
+    my($pattern) = @_;
+    my $modules = {};
+    for my $folder (@INC) {
+        next unless -d $folder;
+        for my $file (glob($folder.$pattern)) {
+            $file =~ s|^\Q$folder/\E||gmx;
+            $modules->{$file} = 1;
+        }
+    }
+    return([sort keys %{$modules}]);
+}
+
+##############################################
+
+=head2 get_cli_modules
+
+    get_cli_modules()
+
+returns list of cli modules
+
+=cut
+sub get_cli_modules {
+    my $modules = find_modules('/Thruk/Utils/CLI/*.pm');
+    @{$modules} = sort map {
+            my $mod = $_;
+            if($mod =~ s/.*\/([^\/]+)\.pm/$1/gmx) {
+                $mod = lc($1);
+            }
+            $mod;
+        } @{$modules};
+    return($modules);
+}
+
+##############################################
+
+=head2 clean_regex
+
+    clean_regex()
+
+returns cleaned regular expression, ex.: removes trailing .*
+
+=cut
+sub clean_regex {
+    my($regex) = @_;
+
+    # trim leading and trailing whitespace
+    $regex =~ s/^\s+//mx;
+    $regex =~ s/\s+$//mx;
+
+    # trim leading and trailing .*(?)
+    $regex =~ s/^\.\*\??//mx;
+    $regex =~ s/\.\*\??$//mx;
+
+    return($regex);
+}
+
+##############################################
+
+=head2 get_timezone_data
+
+    get_timezone_data()
+
+returns list of available timezones
+
+=cut
+sub get_timezone_data {
+    my($c, $add_server) = @_;
+
+    my $timezones = [];
+    my $cache = Thruk::Utils::Cache->new($c->config->{'var_path'}.'/timezones.cache');
+    my $data  = $cache->get('timezones');
+    my $timestamp = Thruk::Utils::format_date(time(), "%Y-%m-%d %H");
+    if(defined $data && $data->{'timestamp'} eq $timestamp) {
+        $timezones = $data->{'timezones'};
+    } else {
+        load "DateTime";
+        load "DateTime::TimeZone";
+        my($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime();
+        for my $name (DateTime::TimeZone->all_names) {
+            my $dt = DateTime->new(
+                year      => $year+1900,
+                month     => $mon+1,
+                day       => $mday,
+                hour      => $hour,
+                minute    => $min,
+                second    => $sec,
+                time_zone => $name,
+            );
+            push @{$timezones}, {
+                text   => $name,
+                abbr   => $dt->time_zone()->short_name_for_datetime($dt),
+                offset => $dt->offset(),
+                isdst  => $dt->is_dst() ? Cpanel::JSON::XS::true : Cpanel::JSON::XS::false,
+            };
+        }
+        $cache->set('timezones', {
+            timestamp => $timestamp,
+            timezones => $timezones,
+        });
+    }
+
+    unshift @{$timezones}, {
+        text   => 'Local Browser',
+        abbr   => '',
+        offset => 0,
+    };
+    if($add_server) {
+        unshift @{$timezones}, {
+            text   => 'Server Setting',
+            abbr   => '',
+            offset => 0,
+        };
+    }
+    return($timezones);
 }
 
 ##############################################

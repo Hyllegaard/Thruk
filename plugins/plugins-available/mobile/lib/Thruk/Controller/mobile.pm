@@ -43,8 +43,10 @@ sub index {
                                         };
         }
 
+        my ($hostfilter, $servicefilter) = _extract_filter_from_param($c);
         my($data,$comments,$downtimes,$pnp_url);
         if($type eq 'notifications') {
+            my($logfilter) = _extract_logfilter_from_param($c);
             my $filter = {
                     '-and' => [
                                 { 'time' => { '>=' => time() - 86400*3 } },
@@ -53,9 +55,10 @@ sub index {
                             ],
             };
 
-            $data = $c->{'db'}->get_logs(filter => [ Thruk::Utils::Auth::get_auth_filter($c, 'log'), $filter], pager => 1, sort => {'DESC' => 'time'});
+            $data = $c->{'db'}->get_logs(filter => [ Thruk::Utils::Auth::get_auth_filter($c, 'log'), $filter, $logfilter], pager => 1, sort => {'DESC' => 'time'});
         }
         elsif($type eq 'alerts') {
+            my($logfilter) = _extract_logfilter_from_param($c);
             my $filter = {
                     '-and' => [
                                 { 'time' => { '>=' => time() - 86400*3 } },
@@ -68,23 +71,27 @@ sub index {
                                 ],
                             }],
             };
-            $data = $c->{'db'}->get_logs(filter => [ Thruk::Utils::Auth::get_auth_filter($c, 'log'), $filter], pager => 1, sort => {'DESC' => 'time'});
+            $data = $c->{'db'}->get_logs(filter => [ Thruk::Utils::Auth::get_auth_filter($c, 'log'), $filter, $logfilter], pager => 1, sort => {'DESC' => 'time'});
         }
         elsif($type eq 'host_stats') {
-            $data = $c->{'db'}->get_host_stats(filter => [ Thruk::Utils::Auth::get_auth_filter($c, 'hosts')]);
+            $data = $c->{'db'}->get_host_stats(filter => [ Thruk::Utils::Auth::get_auth_filter($c, 'hosts'), $hostfilter ]);
         }
         elsif($type eq 'service_stats') {
-            $data = $c->{'db'}->get_service_stats(filter => [ Thruk::Utils::Auth::get_auth_filter($c, 'services')]);
+            $data = $c->{'db'}->get_service_stats(filter => [ Thruk::Utils::Auth::get_auth_filter($c, 'services'), $servicefilter ]);
         }
         elsif($type eq 'hosts') {
-            my ($hostfilter, $servicefilter) = _extract_filter_from_param($c);
-            if(defined $c->req->parameters->{'host'}) {
+            if(defined $c->req->parameters->{'host'} || defined $c->req->parameters->{'filter'}) {
                 $hostfilter = { 'name' => $c->req->parameters->{'host'} };
+                my $commentfilter = { 'host_name' => $c->req->parameters->{'host'} };
+                if(defined $c->req->parameters->{'filter'}) {
+                    $hostfilter    = { 'name' => { '~~' => $c->req->parameters->{'filter'} } };
+                    $commentfilter = { 'host_name' => { '~~' => $c->req->parameters->{'filter'} } };
+                }
                 $comments   = $c->{'db'}->get_comments(
-                                filter => [ Thruk::Utils::Auth::get_auth_filter( $c, 'comments' ), { 'host_name' => $c->req->parameters->{'host'} }, { 'service_description' => undef } ],
+                                filter => [ Thruk::Utils::Auth::get_auth_filter( $c, 'comments' ), $commentfilter, { 'service_description' => undef } ],
                                 sort => { 'DESC' => 'id' } );
                 $downtimes  = $c->{'db'}->get_downtimes(
-                                filter => [ Thruk::Utils::Auth::get_auth_filter( $c, 'downtimes' ), { 'host_name' => $c->req->parameters->{'host'} }, { 'service_description' => undef } ],
+                                filter => [ Thruk::Utils::Auth::get_auth_filter( $c, 'downtimes' ), $commentfilter, { 'service_description' => undef } ],
                                 sort => { 'DESC' => 'id' } );
             }
             $data = $c->{'db'}->get_hosts(filter => [ Thruk::Utils::Auth::get_auth_filter($c, 'hosts'), $hostfilter ], pager => 1);
@@ -93,10 +100,18 @@ sub index {
             }
         }
         elsif($type eq 'services') {
-            my ($hostfilter, $servicefilter) = _extract_filter_from_param($c);
-            if(defined $c->req->parameters->{'host'}) {
+            if(defined $c->req->parameters->{'host'} || defined $c->req->parameters->{'filter'}) {
                 $servicefilter = { 'description' => $c->req->parameters->{'service'},
                                    'host_name'   => $c->req->parameters->{'host'} };
+                my $commentfilter = { 'host_name' => $c->req->parameters->{'host'}, 'service_description' => $c->req->parameters->{'service'}, };
+                if(defined $c->req->parameters->{'filter'}) {
+                    $servicefilter = { -or => [ {'description' => { '~~' => $c->req->parameters->{'filter'} } },
+                                                { 'host_name'  => { '~~' => $c->req->parameters->{'filter'} } },
+                                              ]};
+                    $commentfilter = { -or => [ {'service_description' => { '~~' => $c->req->parameters->{'filter'} } },
+                                                { 'host_name'          => { '~~' => $c->req->parameters->{'filter'} } },
+                                              ]};
+                }
                 $comments      = $c->{'db'}->get_comments(
                                     filter => [ Thruk::Utils::Auth::get_auth_filter( $c, 'comments' ), { 'host_name' => $c->req->parameters->{'host'} }, { 'service_description' => $c->req->parameters->{'service'} } ],
                                     sort => { 'DESC' => 'id' } );
@@ -134,6 +149,19 @@ sub index {
         }
     }
 
+    # add additonal links on the home page
+    $c->stash->{links} = [];
+    if($c->config->{'Thruk::Plugin::Mobile'}->{'links'}) {
+        my $remote_user = $c->stash->{'remote_user'};
+        for my $link (@{Thruk::Utils::list($c->config->{'Thruk::Plugin::Mobile'}->{'links'})}) {
+            my($name,$url) = split(/\s*;\s*/mx, $link, 2);
+            # do not replace in $link, as this would overwrite the config for all users
+            $name =~ s/\$CONTACTNAME\$/$remote_user/gmx;
+            $url  =~ s/\$CONTACTNAME\$/$remote_user/gmx;
+            push @{$c->stash->{links}}, { name => $name, url => $url };
+        }
+    }
+
     $c->stash->{template} = 'mobile.tt';
 
     return 1;
@@ -144,6 +172,23 @@ sub _extract_filter_from_param {
     my($c) = @_;
     my( $search, $hostfilter, $servicefilter, $hostgroupfilter, $servicegroupfilter ) = Thruk::Utils::Status::classic_filter($c);
     return($hostfilter, $servicefilter);
+}
+
+##########################################################
+sub _extract_logfilter_from_param {
+    my($c) = @_;
+    my $filter = [];
+    if(defined $c->req->parameters->{'host'}) {
+        push @{$filter}, { host_name => $c->req->parameters->{'host'} };
+    }
+    if(defined $c->req->parameters->{'service'}) {
+        push @{$filter}, { service_description => $c->req->parameters->{'service'} };
+    }
+    if($c->req->parameters->{'contact'}) {
+        push @{$filter}, { contact_name => $c->req->parameters->{'contact'} };
+    }
+
+    return($filter);
 }
 
 =head1 AUTHOR

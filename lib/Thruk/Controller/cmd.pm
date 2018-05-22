@@ -3,6 +3,7 @@ package Thruk::Controller::cmd;
 use strict;
 use warnings;
 use Data::Dumper;
+use Thruk::Utils::CLI;
 
 =head1 NAME
 
@@ -210,7 +211,12 @@ sub index {
                 }
                 else {
                     $errors++;
-                    Thruk::Utils::set_message( $c, 'fail_message', "command for host $host failed" );
+                    if($c->stash->{'thruk_message'}) {
+                        Thruk::Utils::append_message( $c, "\ncommand for host $host failed" );
+                    } else {
+                        Thruk::Utils::set_message( $c, 'fail_message', "command for host $host failed" );
+                    }
+                    Thruk::Utils::append_message( $c, ', '.$c->stash->{'form_errors'}->[0]{'message'}) if $c->stash->{'form_errors'}->[0];
                     $c->log->debug("command for host $host failed");
                     $c->log->debug( Dumper( $c->stash->{'form_errors'} ) );
                 }
@@ -247,7 +253,12 @@ sub index {
                 }
                 else {
                     $errors++;
-                    Thruk::Utils::set_message( $c, 'fail_message', "command for $service on host $host failed" );
+                    if($c->stash->{'thruk_message'}) {
+                        Thruk::Utils::append_message( $c, "\ncommand for $service on host $host failed" );
+                    } else {
+                        Thruk::Utils::set_message( $c, 'fail_message', "command for $service on host $host failed" );
+                    }
+                    Thruk::Utils::append_message( $c, ', '.$c->stash->{'form_errors'}->[0]{'message'}) if $c->stash->{'form_errors'}->[0];
                     $c->log->debug("command for $service on host $host failed");
                     $c->log->debug( Dumper( $c->stash->{'form_errors'} ) );
                 }
@@ -573,6 +584,7 @@ sub _do_send_command {
         return $c->detach('/error/index/12');
     }
 
+    local $c->{'errored'} = 0;
     my $cmd;
     eval {
         Thruk::Views::ToolkitRenderer::render($c, 'cmd/cmd_typ_' . $cmd_typ . '.tt',
@@ -597,7 +609,13 @@ sub _do_send_command {
         $cmd =~ s/^\s+//gmx;
         $cmd =~ s/\s+$//gmx;
     };
-    $c->log->error('error in first cmd/cmd_typ_' . $cmd_typ . '.tt: '.$@) if $@;
+    if($@) {
+        if($@ =~ m/error\ \-\ (.*?)\ at\ /gmx) {
+            push @{$c->stash->{'form_errors'}}, $1;
+        } else {
+            $c->log->error('error in first cmd/cmd_typ_' . $cmd_typ . '.tt: '.$@);
+        }
+    }
 
     # unknown command given?
     return $c->detach('/error/index/7') unless defined $cmd;
@@ -606,7 +624,7 @@ sub _do_send_command {
     return $c->detach('/error/index/10') unless $cmd ne '';
 
     # check for required fields
-    my($form, @errors);
+    my($form, @errors, $required_fields);
     eval {
         Thruk::Views::ToolkitRenderer::render($c, 'cmd/cmd_typ_' . $cmd_typ . '.tt',
             {   c                         => $c,
@@ -636,6 +654,9 @@ sub _do_send_command {
             my $req  = shift @matches;
             my $name = shift @matches;
             my $key  = shift @matches;
+            if( $req eq 'optBoxRequiredItem') {
+                $required_fields->{$key} = $c->req->parameters->{$key};
+            }
             if( $req eq 'optBoxRequiredItem' && ( !defined $c->req->parameters->{$key} || $c->req->parameters->{$key} =~ m/^\s*$/mx ) ) {
                 push @errors, { message => $name . ' is a required field' };
             }
@@ -646,11 +667,39 @@ sub _do_send_command {
             return;
         }
     }
+    if($c->config->{downtime_max_duration}) {
+        if($cmd_typ == 55 or $cmd_typ == 56 or $cmd_typ == 84 or $cmd_typ == 121) {
+            my $max_duration = Thruk::Utils::expand_duration($c->config->{downtime_max_duration});
+            my $end_time_unix = Thruk::Utils::parse_date( $c, $c->req->parameters->{'end_time'} );
+            if(($end_time_unix - $start_time_unix) > $max_duration) {
+                $c->stash->{'form_errors'} = [{ message => 'Downtime duration exceeds maximum allowed duration: '.Thruk::Utils::Filter::duration($max_duration) }];
+                delete $c->req->parameters->{'cmd_mod'};
+                return;
+            }
+            my $duration = $c->req->parameters->{'hours'} * 3600 + $c->req->parameters->{'minutes'} * 60;
+            if($duration > $max_duration) {
+                $c->stash->{'form_errors'} = [{ message => 'Downtime duration exceeds maximum allowed duration: '.Thruk::Utils::Filter::duration($max_duration) }];
+                delete $c->req->parameters->{'cmd_mod'};
+                return;
+            }
+        }
+    }
 
     my($backends_list) = $c->{'db'}->select_backends('send_command');
     for my $cmd_line ( split /\n/mx, $cmd ) {
         utf8::decode($cmd_line);
         $cmd_line = 'COMMAND [' . time() . '] ' . $cmd_line;
+
+        # if the backend list contains multiple entries,
+        # send the command only to those backends which actually have that object.
+        # this prevents ugly log entries when naemon core cannot find the corresponding object
+        if(scalar @{$backends_list} > 1) {
+            $backends_list = _get_affected_backends($c, $required_fields, $backends_list);
+            if(scalar @{$backends_list} == 0) {
+                return;
+            }
+        }
+
         my $joined_backends = join(',', @{$backends_list});
         push @{$c->stash->{'commands2send'}->{$joined_backends}}, $cmd_line;
 
@@ -660,6 +709,39 @@ sub _do_send_command {
         }
         if($cmd_typ == 2 or $cmd_typ == 78) {
             $c->stash->{'extra_log_comment'}->{$cmd_line} = '  ('.$c->req->parameters->{'host'}.')';
+        }
+    }
+
+    # delete associated comment(s) if we are about to re-enable active checks,
+    # notifications or handlers
+    my %cmds_for_type = (
+        47 => ['DISABLE_HOST_CHECK'],
+        15 => ['DISABLE_HOST_SVC_CHECKS', 'DISABLE_HOST_CHECK'],
+        24 => ['DISABLE_HOST_NOTIFICATIONS', 'DISABLE_HOST_AND_CHILD_NOTIFICATIONS'],
+        28 => ['DISABLE_HOST_SVC_NOTIFICATIONS', 'DISABLE_HOST_NOTIFICATIONS'],
+        43 => ['DISABLE_HOST_EVENT_HANDLER'],
+        5  => ['DISABLE_SVC_CHECK'],
+        22 => ['DISABLE_SVC_NOTIFICATIONS'],
+        45 => ['DISABLE_SVC_EVENT_HANDLER'],
+    );
+    if (exists $cmds_for_type{$cmd_typ}) {
+        my $cli = Thruk::Utils::CLI->new;
+        my $db  = $cli->get_db();
+        for my $cmd (@{$cmds_for_type{$cmd_typ}}) {
+            for my $comm (@{$db->get_comments_by_pattern($c,
+                                                         $c->req->parameters->{'host'},
+                                                         $c->req->parameters->{'service'},
+                                                         $cmd)}) {
+                $c->log->debug("deleting comment with ID $comm->{'id'} on backend $comm->{'backend'}");
+                if ($cmd =~ m/HOST/mx) {
+                    push @{$c->stash->{'commands2send'}->{$comm->{'backend'}}},
+                        sprintf("COMMAND [%d] DEL_HOST_COMMENT;%d\n", time(), $comm->{'id'});
+                }
+                else {
+                    push @{$c->stash->{'commands2send'}->{$comm->{'backend'}}},
+                        sprintf("COMMAND [%d] DEL_SVC_COMMENT;%d\n", time(), $comm->{'id'});
+                }
+            }
         }
     }
 
@@ -681,46 +763,58 @@ sub bulk_send {
     my($c, $commands) = @_;
 
     for my $backends (keys %{$commands}) {
-        my $options = {};
         # remove duplicate commands
         my $commands2send     = Thruk::Utils::array_uniq($commands->{$backends});
-        $options->{'command'} = join("\n\n", @{$commands2send});
-        $options->{'backend'} = [ split(/,/mx, $backends) ];
-        return 1 if $options->{'command'} eq '';
 
-        my @names;
-        for my $b (ref $backends eq 'ARRAY' ? @{$backends} : ($backends)) {
-            my $peer = $c->{'db'}->get_peer_by_key($b);
-            push @names, (defined $peer ? $peer->peer_name() : $b);
+        # bulk send only 100 at a time
+        while(@{$commands2send}) {
+            my $bucket = [ splice @{$commands2send}, 0, 100 ];
+            _bulk_send_backend($c, $backends, $bucket);
         }
-        my $backends_string = join(',', @names);
+    }
+    return 1;
+}
 
-        my $testmode = 0;
-        $testmode    = 1 if (defined $ENV{'THRUK_NO_COMMANDS'} or $c->req->parameters->{'test_only'});
+sub _bulk_send_backend {
+    my($c, $backends, $commands2send) = @_;
 
-        for my $cmd (@{$commands2send}) {
-            utf8::decode($cmd);
-            my $logstr = sprintf('%s[%s][%s] cmd: %s%s',
-                                    ($testmode ? 'TESTMODE: ' : ''),
-                                    $c->user->get('username'),
-                                    $backends_string,
-                                    $cmd,
-                                    ($c->stash->{'extra_log_comment'}->{$cmd} || ''),
-                                );
-            if($ENV{'THRUK_TEST_CMD_NO_LOG'}) {
-                $ENV{'THRUK_TEST_CMD_NO_LOG'} .= "\n".$logstr;
-            } else {
-                $c->log->info($logstr);
-            }
+    my $options = {};
+    $options->{'command'} = join("\n\n", @{$commands2send});
+    $options->{'backend'} = [ split(/,/mx, $backends) ];
+    return 1 if $options->{'command'} eq '';
+
+    my @names;
+    for my $b (ref $backends eq 'ARRAY' ? @{$backends} : ($backends)) {
+        my $peer = $c->{'db'}->get_peer_by_key($b);
+        push @names, (defined $peer ? $peer->peer_name() : $b);
+    }
+    my $backends_string = join(',', @names);
+
+    my $testmode = 0;
+    $testmode    = 1 if (defined $ENV{'THRUK_NO_COMMANDS'} or $c->req->parameters->{'test_only'});
+
+    for my $cmd (@{$commands2send}) {
+        utf8::decode($cmd);
+        my $logstr = sprintf('%s[%s][%s] cmd: %s%s',
+                                ($testmode ? 'TESTMODE: ' : ''),
+                                $c->user->get('username'),
+                                $backends_string,
+                                $cmd,
+                                ($c->stash->{'extra_log_comment'}->{$cmd} || ''),
+                            );
+        if($ENV{'THRUK_TEST_CMD_NO_LOG'}) {
+            $ENV{'THRUK_TEST_CMD_NO_LOG'} .= "\n".$logstr;
+        } else {
+            $c->log->info($logstr);
         }
-        if(!$testmode) {
-            $c->{'db'}->send_command( %{$options} );
-            my $cached_proc = $c->cache->get->{'global'} || {};
-            for my $key (split(/,/mx, $backends)) {
-                delete $cached_proc->{'processinfo'}->{$key};
-            }
-            $c->cache->set('global', $cached_proc);
+    }
+    if(!$testmode) {
+        $c->{'db'}->send_command( %{$options} );
+        my $cached_proc = $c->cache->get->{'global'} || {};
+        for my $key (split(/,/mx, $backends)) {
+            delete $cached_proc->{'processinfo'}->{$key};
         }
+        $c->cache->set('global', $cached_proc);
     }
 
     return 1;
@@ -840,6 +934,42 @@ sub _set_host_service_from_down_com_ids {
         $c->req->parameters->{'service'} = $data->[0]->{'service_description'};
     }
     return;
+}
+
+######################################
+# return list of backends which have the requested objects
+sub _get_affected_backends {
+    my($c, $required_fields, $backends) = @_;
+
+    my $data;
+    if(defined $required_fields->{'hostgroup'}) {
+        $data = $c->{'db'}->get_hostgroups(filter => [ Thruk::Utils::Auth::get_auth_filter( $c, 'hostgroups' ), name => $required_fields->{'hostgroup'}],
+                                           columns => [qw/name/] );
+    }
+    elsif(defined $required_fields->{'servicegroup'}) {
+        $data = $c->{'db'}->get_servicegroups(filter => [ Thruk::Utils::Auth::get_auth_filter( $c, 'servicegroups' ), name => $required_fields->{'servicegroup'}],
+                                              columns => [qw/name/] );
+    }
+    elsif(defined $required_fields->{'service'}) {
+        $data = $c->{'db'}->get_services(filter => [ Thruk::Utils::Auth::get_auth_filter( $c, 'services' ), description => $required_fields->{'service'}, host_name => $required_fields->{'host'}],
+                                         columns => [qw/host_name description/] );
+    }
+    elsif(defined $required_fields->{'host'}) {
+        $data = $c->{'db'}->get_hosts(filter => [ Thruk::Utils::Auth::get_auth_filter( $c, 'hosts' ), name => $required_fields->{'host'}],
+                                      columns => [qw/name/] );
+    }
+
+    # return original list unless we have some data
+    return($backends) unless $data;
+
+    # extract affected backends
+    my $affected_backends = {};
+    for my $row (@{$data}) {
+        for my $peer_key (@{Thruk::Utils::list($row->{'peer_key'})}) {
+            $affected_backends->{$peer_key} = 1;
+        }
+    }
+    return([keys %{$affected_backends}]);
 }
 
 ######################################

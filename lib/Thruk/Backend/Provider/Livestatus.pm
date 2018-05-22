@@ -167,9 +167,16 @@ sub get_processinfo {
             if(defined $options{'extra_columns'}) {
                 push @{$options{'columns'}}, @{$options{'extra_columns'}};
             }
+            if($ENV{'THRUK_USE_LMD'} && $ENV{'THRUK_LMD_VERSION'} && Thruk::Utils::version_compare($ENV{'THRUK_LMD_VERSION'}, '1.3.0')) {
+                push @{$options{'columns'}}, 'configtool';
+            }
+            if($ENV{'THRUK_USE_LMD'}) {
+                push @{$options{'columns'}}, 'peer_name';
+                push @{$options{'columns'}}, 'peer_addr';
+            }
         }
 
-        $options{'options'}->{AddPeer} = 1;
+        $options{'options'}->{AddPeer} = 1 unless defined $options{'options'}->{AddPeer};
         $options{'options'}->{rename}  = { 'livestatus_version' => 'data_source_version' };
         $options{'options'}->{wrapped_json} = $self->{'lmd_optimizations'};
 
@@ -183,13 +190,38 @@ sub get_processinfo {
         return $data if $self->{'lmd_optimizations'};
     }
 
-    $data->{$key}->{'data_source_version'} = "Livestatus ".$data->{$key}->{'data_source_version'};
+    $data->{$key}->{'data_source_version'} = "Livestatus ".($data->{$key}->{'data_source_version'} || 'unknown');
     $self->{'naemon_optimizations'} = 0 unless defined $self->{'naemon_optimizations'};
     $self->{'naemon_optimizations'} = 1 if $data->{$key}->{'data_source_version'} =~ m/\-naemon$/mx;
 
     # naemon checks external commands on arrival
-    $data->{$key}->{'last_command_check'} = time() if $data->{$key}->{'last_command_check'} == $data->{$key}->{'program_start'};
+    if(defined $data->{$key}->{'program_start'} && $data->{$key}->{'last_command_check'} == $data->{$key}->{'program_start'}) {
+        $data->{$key}->{'last_command_check'} = time();
+    }
     return($data, 'HASH');
+}
+
+##########################################################
+
+=head2 get_sites
+
+return the sites list from lmd
+
+=cut
+sub get_sites {
+    my($self, %options) = @_;
+    return($options{'data'}) if($options{'data'});
+    unless(defined $options{'columns'}) {
+        $options{'columns'} = [qw/
+            peer_key peer_name key name addr status bytes_send bytes_received queries
+            last_error last_update last_online response_time idling last_query
+            parent section
+        /];
+        if(defined $options{'extra_columns'}) {
+            push @{$options{'columns'}}, @{$options{'extra_columns'}};
+        }
+    }
+    return $self->_get_table('sites', \%options);
 }
 
 ##########################################################
@@ -207,7 +239,7 @@ sub get_can_submit_commands {
             $self->{'live'}
                     ->table('contacts')
                     ->columns(qw/can_submit_commands
-                                 alias/)
+                                 alias email/)
                     ->filter({ name => $user })
                     ->options({AddPeer => 1}))
                     ->hashref_array();
@@ -721,9 +753,18 @@ sub get_logs {
         return $self->{'_peer'}->logcache->get_logs(%options);
     }
     # optimized naemon with wrapped_json output
-    if($self->{'lmd_optimizations'}) {
-        $self->_optimized_for_wrapped_json(\%options, "logs");
-        #&timing_breakpoint('optimized get_hosts') if $self->{'optimized'};
+    if($self->{'naemon_optimizations'}) {
+        $self->_optimized_for_wrapped_json(\%options, "log");
+        #&timing_breakpoint('optimized get_logs') if $self->{'optimized'};
+    }
+    # try to reduce the amount of transfered data
+    my($size, $limit);
+    if(!$self->{'optimized'} && defined $options{'pager'} && !$options{'file'}) {
+        ($size, $limit) = $self->_get_query_size('log', \%options, 'time', 'time');
+        if(defined $size) {
+            # then set the limit for the real query
+            $options{'options'}->{'limit'} = $limit;
+        }
     }
     unless(defined $options{'columns'}) {
         $options{'columns'} = [qw/
@@ -735,8 +776,12 @@ sub get_logs {
     }
 
     my @logs = reverse @{$self->_get_table('log', \%options)};
+    unless(wantarray) {
+        confess("get_logs() should not be called in scalar context when not used with file option");
+    }
+
     return(Thruk::Utils::IO::save_logs_to_tempfile(\@logs), 'file') if $options{'file'};
-    return \@logs;
+    return(\@logs, undef, $size);
 }
 
 
@@ -967,12 +1012,15 @@ sub get_host_totals_stats {
         return(\%{$rows->[0]}, 'SUM');
     }
 
+    # unhandled are required for playing sounds on details page
     my $stats = [
         'total'                             => { -isa => { -and => [ 'name' => { '!=' => '' } ]}},
         'pending'                           => { -isa => { -and => [ 'has_been_checked' => 0 ]}},
         'up'                                => { -isa => { -and => [ 'has_been_checked' => 1, 'state' => 0 ]}},
         'down'                              => { -isa => { -and => [ 'has_been_checked' => 1, 'state' => 1 ]}},
+        'down_and_unhandled'                => { -isa => { -and => [ 'has_been_checked' => 1, 'state' => 1, 'active_checks_enabled' => 1, 'acknowledged' => 0, 'scheduled_downtime_depth' => 0 ]}},
         'unreachable'                       => { -isa => { -and => [ 'has_been_checked' => 1, 'state' => 2 ]}},
+        'unreachable_and_unhandled'         => { -isa => { -and => [ 'has_been_checked' => 1, 'state' => 2, 'active_checks_enabled' => 1, 'acknowledged' => 0, 'scheduled_downtime_depth' => 0 ]}},
     ];
     $class->reset_filter()->stats($stats)->save_filter('hoststatstotals');
     return($self->get_host_totals_stats(%options));
@@ -1079,13 +1127,17 @@ sub get_service_totals_stats {
         return(\%{$rows->[0]}, 'SUM');
     }
 
+    # unhandled are required for playing sounds on details page
     my $stats = [
         'total'                             => { -isa => { -and => [ 'description' => { '!=' => '' } ]}},
         'pending'                           => { -isa => { -and => [ 'has_been_checked' => 0 ]}},
         'ok'                                => { -isa => { -and => [ 'has_been_checked' => 1, 'state' => 0 ]}},
         'warning'                           => { -isa => { -and => [ 'has_been_checked' => 1, 'state' => 1 ]}},
+        'warning_and_unhandled'             => { -isa => { -and => [ 'has_been_checked' => 1, 'state' => 1, 'host_state' => 0, 'active_checks_enabled' => 1, 'acknowledged' => 0, 'scheduled_downtime_depth' => 0 ]}},
         'critical'                          => { -isa => { -and => [ 'has_been_checked' => 1, 'state' => 2 ]}},
+        'critical_and_unhandled'            => { -isa => { -and => [ 'has_been_checked' => 1, 'state' => 2, 'host_state' => 0, 'active_checks_enabled' => 1, 'acknowledged' => 0, 'scheduled_downtime_depth' => 0 ]}},
         'unknown'                           => { -isa => { -and => [ 'has_been_checked' => 1, 'state' => 3 ]}},
+        'unknown_and_unhandled'             => { -isa => { -and => [ 'has_been_checked' => 1, 'state' => 3, 'host_state' => 0, 'active_checks_enabled' => 1, 'acknowledged' => 0, 'scheduled_downtime_depth' => 0 ]}},
     ];
     $class->reset_filter()->stats($stats)->save_filter('servicestatstotals');
     return($self->get_service_totals_stats(%options));
@@ -1164,7 +1216,7 @@ sub get_performance_stats {
         if($ENV{'THRUK_SELECT'}) {
             push @{$selects}, $rows;
         } else {
-            $data = { %{$data}, %{$rows->[0]} };
+            $data = { %{$data}, %{$rows->[0]} } if $rows->[0];
         }
 
         # add stats for passive checks
@@ -1179,7 +1231,7 @@ sub get_performance_stats {
         if($ENV{'THRUK_SELECT'}) {
             push @{$selects}, $rows;
         } else {
-            $data  = { %{$data}, %{$rows->[0]} };
+            $data  = { %{$data}, %{$rows->[0]} } if $rows->[0];
         }
     }
 
@@ -1350,12 +1402,16 @@ sub _get_query_size {
     return unless defined $options->{'pager'};
     if(defined $options->{'sort'}) {
         return unless ref $options->{'sort'} eq 'HASH';
-        return unless defined $options->{'sort'}->{'ASC'};
-        if(ref $options->{'sort'}->{'ASC'} eq 'ARRAY') {
-            return if defined $sortby1 and $options->{'sort'}->{'ASC'}->[0] ne $sortby1;
-            return if defined $sortby2 and $options->{'sort'}->{'ASC'}->[1] ne $sortby2;
+        if($options->{'sort'}->{'DESC'} && $sortby1 && $sortby1 eq 'DESC') {
+            return if(!$sortby2 || $sortby2 ne $options->{'sort'}->{'DESC'});
         } else {
-            return if defined $sortby1 and $options->{'sort'}->{'ASC'} ne $sortby1;
+            return unless defined $options->{'sort'}->{'ASC'};
+            if(ref $options->{'sort'}->{'ASC'} eq 'ARRAY') {
+                return if defined $sortby1 and $options->{'sort'}->{'ASC'}->[0] ne $sortby1;
+                return if defined $sortby2 and $options->{'sort'}->{'ASC'}->[1] ne $sortby2;
+            } else {
+                return if defined $sortby1 and $options->{'sort'}->{'ASC'} ne $sortby1;
+            }
         }
     }
 
@@ -1392,6 +1448,19 @@ sub _get_query_size {
 
 ##########################################################
 
+=head2 get_logs_start_end
+
+  get_logs_start_end
+
+returns first and last logfile entry
+
+=cut
+sub get_logs_start_end {
+    return(_get_logs_start_end(@_));
+}
+
+##########################################################
+
 =head2 _get_logs_start_end
 
   _get_logs_start_end
@@ -1401,6 +1470,15 @@ returns the min/max timestamp for given logs
 =cut
 sub _get_logs_start_end {
     my($self, %options) = @_;
+    if(defined $self->{'_peer'}->{'logcache'} && !defined $options{'nocache'}) {
+        $options{'collection'} = 'logs_'.$self->peer_key();
+        return $self->{'_peer'}->logcache->_get_logs_start_end(%options);
+    }
+    if(!$options{'filter'} || scalar @{$options{'filter'}} == 0) {
+        # not a good idea, try to assume earliest date without parsing all logfiles
+        my($start, $end) = Thruk::Backend::Manager::get_logs_start_end_no_filter($self);
+        return([$start, $end]);
+    }
     my $class = $self->_get_class('log', \%options);
     my $rows  = $class->stats([ 'start' => { -isa => [ -min => 'time' ]},
                                 'end'   => { -isa => [ -max => 'time' ]},

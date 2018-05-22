@@ -110,12 +110,18 @@ sub new {
         $self = \%args;
     }
 
-    $self->{backend_obj} = Monitoring::Livestatus->new(
+    my $backend_args = {
         name      => $self->{'name'},
         peer      => $self->{'peer'},
         verbose   => $self->{'verbose'},
         keepalive => $self->{'keepalive'},
-    );
+        cert      => $self->{'cert'},
+        key       => $self->{'key'},
+        ca_file   => $self->{'ca_file'},
+        verify    => $self->{'verify'},
+    };
+    $backend_args->{'retries_on_connection_error'} = $self->{'retries_on_connection_error'} if defined $self->{'retries_on_connection_error'};
+    $self->{backend_obj} = Monitoring::Livestatus->new(%{$backend_args});
     bless($self, $class);
 
     return $self;
@@ -338,7 +344,9 @@ sub statement {
 
     my @statements = ();
     if( $self->{'_backends'} && ! $filter_only ) {
-        push @statements, sprintf('Backends: %s',join(' ',@{ $self->{'_backends'} }));
+        if(scalar @{$self->{'_backends'}} != 1 || $self->{'_backends'}->[0] ne 'ALL') {
+            push @statements, sprintf('Backends: %s',join(' ',@{ $self->{'_backends'} }));
+        }
     }
 
     if( $self->{'_columns'} ) {

@@ -7,12 +7,12 @@ Ext.onReady(function() {
         target:    Ext.getBody(),
         delegate: 'A.tooltipTarget', // the cell class in which the tooltip has to be triggered
         dismissDelay:    0,
-        width:         400,
+        width:         500,
         manageHeight: false,
-        maxWidth:      400,
+        maxWidth:      500,
         hideDelay:     300,
         closable:     true,
-        showDelay:    1000,
+        showDelay:     500,
         //closable:  true, hideDelay: 6000000, // enable for easier css debuging
         style:    'background: #E5E5E5',
         bodyStyle:'background: #E5E5E5',
@@ -20,6 +20,20 @@ Ext.onReady(function() {
         html:      '',
         listeners: {
             move: function(This, x, y, eOpts) {
+                var position = "automatic";
+                if(TP.iconTipTarget && TP.iconTipTarget.xdata.popup && TP.iconTipTarget.xdata.popup.popup_position != "" && TP.iconTipTarget.xdata.popup.popup_position != "automatic") {
+                    position =  TP.iconTipTarget.xdata.popup.popup_position;
+                }
+                if(position == "relative position") {
+                    This.suspendEvents(false);
+                    TP.iconTip.setFixedOffsetPosition(TP.iconTipTarget, TP.iconTipTarget.xdata.popup.popup_x, TP.iconTipTarget.xdata.popup.popup_y);
+                    This.resumeEvents(false);
+                }
+                if(position == "absolute position") {
+                    This.suspendEvents(false);
+                    TP.iconTip.setFixedPosition(TP.iconTipTarget.xdata.popup.popup_x, TP.iconTipTarget.xdata.popup.popup_y);
+                    This.resumeEvents(false);
+                }
                 if(TP.iconSettingsWindow && TP.iconTip.isVisible()) {
                     This.suspendEvents(false);
                     TP.iconTip.alignToSettingsWindow();
@@ -40,7 +54,7 @@ Ext.onReady(function() {
                 }
                 var tabpan = Ext.getCmp('tabpan');
                 var tab = tabpan.getActiveTab();
-                if(!tab.locked && !TP.iconSettingsWindow) {
+                if(!tab || !tab.locked && !TP.iconSettingsWindow) {
                     return(false);
                 }
                 if(!TP.iconSettingsWindow) {
@@ -63,9 +77,19 @@ Ext.onReady(function() {
             show: function(This) {
                 if(TP.iconTip.detailsTarget) { TP.iconTip.detailsTarget.doLayout(); }
                 var size = This.getSize();
-                if(size.width <= 1 || size.height <= 1) { size = {width: 400, height: 150} }
+                if(size.width <= 1 || size.height <= 1) { size = {width: 500, height: 150} }
 
-                if(!TP.iconSettingsWindow) {
+                var position = "automatic";
+                if(TP.iconTipTarget && TP.iconTipTarget.xdata.popup && TP.iconTipTarget.xdata.popup.popup_position != "" && TP.iconTipTarget.xdata.popup.popup_position != "automatic") {
+                    position = TP.iconTipTarget.xdata.popup.popup_position;
+                }
+                if(position == "relative position") {
+                    TP.iconTip.setFixedOffsetPosition(TP.iconTipTarget, TP.iconTipTarget.xdata.popup.popup_x, TP.iconTipTarget.xdata.popup.popup_y);
+                }
+                else if(position == "absolute position") {
+                    TP.iconTip.setFixedPosition(TP.iconTipTarget.xdata.popup.popup_x, TP.iconTipTarget.xdata.popup.popup_y);
+                }
+                else if(!TP.iconSettingsWindow) {
                     var showAtPos = TP.getNextToPanelPos(TP.iconTip.panel, size.width, size.height);
                     var pos = This.getPosition();
                     if(pos[0] != showAtPos[0] || pos[1] != showAtPos[1]) {
@@ -82,7 +106,7 @@ Ext.onReady(function() {
                     if(TP.iconSettingsWindow) { return; }
                     This.delayHide();
                 });
-                if(TP.iconSettingsWindow) {
+                if(TP.iconSettingsWindow && position == "automatic") {
                     this.alignToSettingsWindow();
                 }
                 This.hidden = false;
@@ -97,12 +121,39 @@ Ext.onReady(function() {
             destroy: function(This) { delete TP.iconTip; delete TP.iconTipTarget; }
         },
         alignToSettingsWindow: function() {
+            var position = "automatic";
+            var xdata = {};
             if(TP.iconSettingsWindow) {
+                xdata = TP.get_icon_form_xdata(TP.iconSettingsWindow);
+            }
+            else if(TP.iconTipTarget) {
+                xdata = TP.iconTipTarget.xdata;
+            }
+            if(xdata.popup && xdata.popup.popup_position != "" && xdata.popup.popup_position != "automatic") {
+                position = xdata.popup.popup_position;
+            }
+            if(position == "relative position") {
+                TP.iconTip.setFixedOffsetPosition(TP.iconSettingsWindow.panel || TP.iconTipTarget, xdata.popup.popup_x, xdata.popup.popup_y);
+            }
+            else if(position == "absolute position") {
+                TP.iconTip.setFixedPosition(xdata.popup.popup_x, xdata.popup.popup_y);
+            }
+            else if(TP.iconSettingsWindow) {
                 var size = TP.iconSettingsWindow.getSize();
                 var pos  = TP.iconSettingsWindow.getPosition();
                 TP.suppressIconTipForce = false;
                 this.showAt([pos[0] + size.width + 10, pos[1]]);
             }
+        },
+        setFixedOffsetPosition: function(panel, x, y) {
+            if(!panel || !panel.getPosition) { return; }
+            var pos  = panel.getPosition();
+            TP.suppressIconTipForce = false;
+            this.showAt([pos[0]+x, pos[1]+y]);
+        },
+        setFixedPosition: function(x, y) {
+            TP.suppressIconTipForce = false;
+            this.showAt([x, y]);
         }
     });
 
@@ -131,13 +182,13 @@ Ext.onReady(function() {
 
         var tabpan = Ext.getCmp('tabpan');
         var tab = tabpan.getActiveTab();
-        if(!tab.locked && !TP.iconSettingsWindow) { delete TP.iconTipTarget; return; }
+        if(tab && !tab.locked && !TP.iconSettingsWindow) { delete TP.iconTipTarget; return; }
 
         if(!force && TP.suppressIconTip) { delete TP.iconTipTarget; return; }
         evt.stopEvent();
         TP.iconTipTarget = img;
 
-        if(!force && ( TP.iconTip.last_id && TP.iconTip.last_id == el.id)) { return; }
+        if(!force && ( TP.iconTip.last_id && TP.iconTip.last_id == el.id)) { TP.suppressIconTipForce = false; return; }
         TP.iconTip.panel   = img;
         /* hide when in edit mode */
         if(!force && !img.locked) { return; }
@@ -238,9 +289,15 @@ Ext.onReady(function() {
         TP.iconTip.update(details);
         var size;
         if(TP.iconTip.el) { size = TP.iconTip.getSize(); }
-        if(size == undefined || size.width <= 1 || size.height <= 1) { size = {width: 400, height: 150} }
+        if(size == undefined || size.width <= 1 || size.height <= 1) { size = {width: 500, height: 150} }
         TP.suppressIconTipForce = false;
-        if(!TP.iconSettingsWindow) {
+        if(xdata.popup && xdata.popup.popup_position == "relative position") {
+            TP.iconTip.setFixedOffsetPosition(img, xdata.popup.popup_x, xdata.popup.popup_y);
+        }
+        else if(xdata.popup && xdata.popup.popup_position == "absolute position") {
+            TP.iconTip.setFixedPosition(xdata.popup.popup_x, xdata.popup.popup_y);
+        }
+        else if(!TP.iconSettingsWindow) {
             var showAtPos = TP.getNextToPanelPos(img, size.width, size.height);
             TP.iconTip.showAt(showAtPos);
         } else {
@@ -255,13 +312,17 @@ Ext.onReady(function() {
                 style = 'hostdetail';
             }
             link = link+'&style='+style+'&view_mode=json';
+            if(!document.getElementById('tipdetails')) {
+                // will result in js error if renderTo target does not (yet) exist
+                return;
+            }
             if(TP.iconTip.detailsTarget) { TP.iconTip.detailsTarget.destroy(); }
             TP.iconTip.detailsTarget = Ext.create('Ext.panel.Panel', {
                 renderTo: 'tipdetails',
                 html:     ' ',
                 border:     0,
                 minHeight: 40,
-                width:     380
+                width:     480
             });
             TP.iconTip.detailsTarget.body.mask("loading");
             if(link == TP.iconTip.lastUrl && TP.iconTip.lastData) {
@@ -407,9 +468,15 @@ TP.renderTipDetails = function(data) {
     // make sure new size fits viewport
     TP.iconTip.detailsTarget.doLayout();
     TP.suppressIconTipForce = false;
-    if(!TP.iconSettingsWindow) {
+    if(panel.xdata.popup && panel.xdata.popup.popup_position == "relative position") {
+        TP.iconTip.setFixedOffsetPosition(img, panel.xdata.popup.popup_x, panel.xdata.popup.popup_y);
+    }
+    else if(panel.xdata.popup && panel.xdata.popup.popup_position == "absolute position") {
+        TP.iconTip.setFixedPosition(panel.xdata.popup.popup_x, panel.xdata.popup.popup_y);
+    }
+    else if(!TP.iconSettingsWindow) {
         var size      = TP.iconTip.getSize();
-        if(size.width <= 1 || size.height <= 1) { size = {width: 400, height: 150} }
+        if(size.width <= 1 || size.height <= 1) { size = {width: 500, height: 150} }
         var showAtPos = TP.getNextToPanelPos(panel, size.width, size.height);
         TP.iconTip.showAt(showAtPos);
     } else {

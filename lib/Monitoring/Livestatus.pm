@@ -6,13 +6,13 @@ use warnings;
 use Data::Dumper qw/Dumper/;
 use Carp qw/carp croak confess/;
 use Digest::MD5 qw(md5_hex);
-use JSON::XS ();
+use Cpanel::JSON::XS ();
 use Storable qw/dclone/;
 
 use Monitoring::Livestatus::INET qw//;
 use Monitoring::Livestatus::UNIX qw//;
 
-our $VERSION = '0.76';
+our $VERSION = '0.80';
 
 
 # list of allowed options
@@ -84,21 +84,21 @@ address
 
 verbose mode
 
-=item line_seperator
+=item line_separator
 
-ascii code of the line seperator, defaults to 10, (newline)
+ascii code of the line separator, defaults to 10, (newline)
 
-=item column_seperator
+=item column_separator
 
-ascii code of the column seperator, defaults to 0 (null byte)
+ascii code of the column separator, defaults to 0 (null byte)
 
-=item list_seperator
+=item list_separator
 
-ascii code of the list seperator, defaults to 44 (comma)
+ascii code of the list separator, defaults to 44 (comma)
 
-=item host_service_seperator
+=item host_service_separator
 
-ascii code of the host/service seperator, defaults to 124 (pipe)
+ascii code of the host/service separator, defaults to 124 (pipe)
 
 =item keepalive
 
@@ -143,10 +143,10 @@ sub new {
       'server'                      => undef,   # use tcp connections
       'peer'                        => undef,   # use for socket / server connections
       'name'                        => undef,   # human readable name
-      'line_seperator'              => 10,      # defaults to newline
-      'column_seperator'            => 0,       # defaults to null byte
-      'list_seperator'              => 44,      # defaults to comma
-      'host_service_seperator'      => 124,     # defaults to pipe
+      'line_separator'              => 10,      # defaults to newline
+      'column_separator'            => 0,       # defaults to null byte
+      'list_separator'              => 44,      # defaults to comma
+      'host_service_separator'      => 124,     # defaults to pipe
       'keepalive'                   => 0,       # enable keepalive?
       'errors_are_fatal'            => 1,       # die on errors
       'backend'                     => undef,   # should be keept undef, used internally
@@ -158,7 +158,28 @@ sub new {
       'deepcopy'                    => undef,   # copy result set to avoid errors with tied structures
       'retries_on_connection_error' => 3,       # retry x times to connect
       'retry_interval'              => 1,       # retry after x seconds
+    # tls options
+      'cert'                        => undef,
+      'key'                         => undef,
+      'ca_file'                     => undef,
+      'verify'                      => undef,
     };
+
+    my %old_key = (
+                    line_seperator         => 'line_separator',
+                    column_seperator       => 'column_separator',
+                    list_seperator         => 'list_separator',
+                    host_service_seperator => 'host_service_separator',
+                  );
+
+    # previous versions had spelling errors in the key name
+    for my $opt_key (keys %old_key) {
+        if(exists $options{$opt_key}) {
+            my $value = $options{$opt_key};
+            $options{ $old_key{$opt_key} } = $value;
+            delete $options{$opt_key};
+        }
+    }
 
     for my $opt_key (keys %options) {
         if(exists $self->{$opt_key}) {
@@ -840,7 +861,7 @@ sub _send {
     if($status == 200) {
         $result = $body;
     } else {
-        my $json_decoder = JSON::XS->new->utf8->relaxed;
+        my $json_decoder = Cpanel::JSON::XS->new->utf8->relaxed;
         # fix json output
         eval {
             $result = $json_decoder->decode($body);
@@ -1013,7 +1034,7 @@ useful when using multiple backends.
     deep copy/clone the result set.
 
     Only effective when using multiple backends and threads.
-    This can be safely turned off if you dont change the
+    This can be safely turned off if you don't change the
     result set.
     If you get an error like "Invalid value for shared scalar" error" this
     should be turned on.
@@ -1124,10 +1145,10 @@ sub _send_socket {
 ########################################
 sub _send_socket_do {
     my($self, $statement) = @_;
-    my $sock = $self->_open() or return(491, $self->_get_error(491, $!), $!);
+    my $sock = $self->_open() or return(491, $self->_get_error(491, $@ || $!), $@ || $!);
     utf8::decode($statement);
     utf8::encode($statement);
-    print $sock $statement or return($self->_socket_error($statement, $sock, 'write to socket failed: '.$!));
+    print $sock $statement or return($self->_socket_error($statement, $sock, 'write to socket failed: '.($@ || $!)));
     print $sock "\n";
     return $sock;
 }
@@ -1150,7 +1171,7 @@ sub _read_socket_do {
     if($json_decoder) {
         $json_decoder->incr_reset;
     } else {
-        $json_decoder = JSON::XS->new->utf8->relaxed;
+        $json_decoder = Cpanel::JSON::XS->new->utf8->relaxed;
     }
     if($content_length > 0) {
         if($status == 200) {
@@ -1172,6 +1193,9 @@ sub _read_socket_do {
     }
 
     $self->_close($sock) unless $self->{'keepalive'};
+    if($status >= 400 && $recv) {
+        $msg .= ' - '.$recv;
+    }
     return($status, $msg, $recv);
 }
 
@@ -1382,7 +1406,7 @@ sub _get_error {
         '452' => 'internal livestatus error',
         '490' => 'no query',
         '491' => 'failed to connect',
-        '492' => 'Separators not allowed in statement. Please use the seperator options in new()',
+        '492' => 'Separators not allowed in statement. Please use the separator options in new()',
         '493' => 'OuputFormat not allowed in statement. Header will be set automatically',
         '494' => 'ColumnHeaders not allowed in statement. Header will be set automatically',
         '495' => 'ResponseHeader not allowed in statement. Header will be set automatically',

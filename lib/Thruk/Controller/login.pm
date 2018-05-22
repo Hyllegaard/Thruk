@@ -34,8 +34,9 @@ sub index {
     $c->stash->{'template'}       = 'login.tt';
     my $product_prefix            = $c->config->{'product_prefix'};
 
-    my $cookie_path = $c->stash->{'cookie_path'};
-    my $sdir        = $c->config->{'var_path'}.'/sessions';
+    my $cookie_path   = $c->stash->{'cookie_path'};
+    my $cookie_domain = _get_cookie_domain($c);
+    my $sdir          = $c->config->{'var_path'}.'/sessions';
     Thruk::Utils::IO::mkdir($sdir);
 
     my $keywords = $c->req->uri->query;
@@ -57,7 +58,11 @@ sub index {
         }
 
         if($keywords eq 'nocookie') {
-            Thruk::Utils::set_message( $c, 'fail_message', 'login not possible without accepting cookies' );
+            my $hint = '';
+            if($cookie_domain) {
+                $hint = ' (cookie domain is set to: '.$cookie_domain.')';
+            }
+            Thruk::Utils::set_message( $c, 'fail_message', 'login not possible without accepting cookies'.$hint );
         }
         if($keywords =~ /^expired\&(.*)$/mx or $keywords eq 'expired') {
             _invalidate_current_session($c, $cookie_path, $sdir);
@@ -100,7 +105,7 @@ sub index {
         $c->cookie('thruk_test' => '', {
             expires => 0,
             path    => $cookie_path,
-            domain  => ($c->config->{'cookie_auth_domain'} ? $c->config->{'cookie_auth_domain'} : ''),
+            domain  => $cookie_domain,
         });
         if(   (!defined $testcookie || !$testcookie->value)
            && (!defined $c->req->header('user-agent') || $c->req->header('user-agent') !~ m/wget/mix)) {
@@ -113,14 +118,14 @@ sub index {
                 return $c->redirect_to($c->stash->{'url_prefix'}."cgi-bin/login.cgi?problem&".$referer);
             }
             elsif($success) {
+                $c->stash->{'remote_user'} = $login;
                 $c->cookie('thruk_auth' => $success, {
                     path    => $cookie_path,
-                    domain  => ($c->config->{'cookie_auth_domain'} ? $c->config->{'cookie_auth_domain'} : ''),
+                    domain  => $cookie_domain,
                 });
                 # call a script hook after successful login?
                 if($c->config->{'cookie_auth_login_hook'}) {
-                    my $cookie_hook = 'REMOTE_USER="'.$login.'" '.$c->config->{'cookie_auth_login_hook'}.' >/dev/null 2>&1 &';
-                    `$cookie_hook`;
+                    Thruk::Utils::IO::cmd($c, $c->config->{'cookie_auth_login_hook'}.' >/dev/null 2>&1 &');
                 }
                 return $c->redirect_to($referer);
             } else {
@@ -145,8 +150,12 @@ sub index {
     # set test cookie
     $c->cookie('thruk_test' => '****', {
         path    => $cookie_path,
-        domain  => ($c->config->{'cookie_auth_domain'} ? $c->config->{'cookie_auth_domain'} : ''),
+        domain  => $cookie_domain,
     });
+    if($c->config->{'cookie_auth_domain'} && $cookie_domain ne $c->config->{'cookie_auth_domain'}) {
+        Thruk::Utils::set_message( $c, 'warn_message', 'using '.$cookie_domain.' instead of the configured cookie_auth_domain '.$c->config->{'cookie_auth_domain'});
+    }
+    $c->stash->{'cookie_domain'} = $cookie_domain;
 
     $c->stats->profile(end => "login::index");
 
@@ -160,7 +169,7 @@ sub _invalidate_current_session {
     $c->cookie('thruk_auth' => '', {
         expires => 0,
         path    => $cookie_path,
-        domain  => ($c->config->{'cookie_auth_domain'} ? $c->config->{'cookie_auth_domain'} : ''),
+        domain  => _get_cookie_domain($c),
     });
     if(defined $cookie and defined $cookie->value) {
         my $sessionid = $cookie->value;
@@ -169,6 +178,21 @@ sub _invalidate_current_session {
         }
     }
     return;
+}
+
+##########################################################
+sub _get_cookie_domain {
+    my($c) = @_;
+    my $domain = $c->config->{'cookie_auth_domain'};
+    return "" unless $domain;
+    my $http_host = $c->req->env->{'HTTP_HOST'};
+    # remove port
+    $http_host =~ s/:\d+$//gmx;
+    $domain =~ s/\.$//gmx;
+    if($http_host !~ m/\Q$domain\E$/mx) {
+        return($http_host);
+    }
+    return $domain;
 }
 
 ##########################################################

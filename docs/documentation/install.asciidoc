@@ -157,6 +157,91 @@ image:source/backends.png[Thruk Backends Manager]
 .Livestatus Architecture
 image:source/livestatus.png[Livestatus Architecture]
 
+.thruk_local.conf:
+-------
+  <Component Thruk::Backend>
+      <peer>
+          name    = local livestatus
+          type    = livestatus
+          <options>
+              peer    = /var/run/live
+          </options>
+      </peer>
+  </Component>
+-------
+
+
+=== TLS Livestatus
+{% include new_since.ad version="2.20" %}
+
+TLS Livestatus is just like livestatus but encrypted with TLS/SSL. Therefor
+you need to create certificates and configure your backend(s) for example like:
+
+.thruk_local.conf:
+-------
+  <Component Thruk::Backend>
+      <peer>
+          name    = remote_site
+          type    = livestatus
+          <options>
+              peer    = tls://remote_host:6557
+              cert    = /etc/thruk/client.pem
+              key     = /etc/thruk/client.key
+              ca_file = /etc/thruk/server.crt
+              verify  = 1
+          </options>
+      </peer>
+  </Component>
+-------
+
+Adding `cert` and `key` is optional and enables client certificate authorization.
+The `ca_file` is used to verify the certificate of the server. Hostname and
+certificate verification can be disabled by setting `verify` to 0. But it's
+not recommended and makes your connection as secure as without tls.
+
+A full configuration example is here assuming an omd installation with a site named `demo`:
+
+Fetch makecert.sh from https://github.com/sni/Thruk/blob/master/support/makecert.sh
+-------
+  %> ./makecert.sh remote_host your@email.com
+-------
+
+xinetd.conf:
+-------
+  service tls_livestatus
+  {
+          type            = UNLISTED
+          socket_type     = stream
+          protocol        = tcp
+          port            = 6557
+          wait            = no
+          cps             = 100 3
+          instances       = 500
+          per_source      = 250
+          flags           = NODELAY
+          disable         = no
+          user            = demo
+          server          = /usr/bin/stunnel
+          server_args     = /omd/sites/demo/etc/stunnel/stunnel.conf
+  }
+-------
+
+stunnel.conf:
+-------
+  service                = tls_livestatus
+  exec                   = /usr/bin/timeout
+  execargs               = timeout 600 /omd/versions/default/bin/unixcat /omd/sites/demo/tmp/run/live
+  cert                   = /omd/sites/demo/etc/stunnel/server.pem
+  key                    = /omd/sites/demo/etc/stunnel/server.key
+  compression            = zlib
+  ciphers                = AES128-SHA
+  verify                 = 2
+  CAfile                 = /omd/sites/demo/etc/stunnel/client.pem
+  TIMEOUTidle            = 600
+  debug                  = debug
+  output                 = /omd/sites/demo/var/log/stunnel.log
+  syslog                 = no
+-------
 
 
 === HTTP
@@ -186,26 +271,25 @@ It's strongly recommended to use HTTPS for remote connections.
 image:source/livestatus_http.png[HTTP Architecture]
 
 
+.thruk_local.conf:
+-------
+  <Component Thruk::Backend>
+      <peer>
+          name    = remote_http
+          type    = http
+          <options>
+              peer  = http://remote_host/thruk/
+              auth  = key from remote installation var/thruk/secret.key
+          </options>
+      </peer>
+  </Component>
+-------
 
-=== MongoDB
-The MongoDB is not a real backend for status data, but it can be used as a
-logfile cache. If unsure whether to use MongoDB or MySQL, use MySQL which is
-newer and faster. The MongoDB logfile cache may be deprecated in the future.
-
-[WARNING]
-The MongoDB logcache is deprecated and will be removed from Thruk in 2016. Use the MySQL logcache instead.
-
-ex.:
-
-  logcache = mongodb://localhost:27017/thruk_logs
-
-Details are explained in the link:logfile-cache.html[Logfile Cache] section.
 
 
 === MySQL
 The MySQL Database is not a real backend for status data, but it can be used as a
-logfile cache. If unsure whether to use MongoDB or MySQL, use MySQL which is
-newer and faster. The MongoDB logfile cache may be deprecated in the future.
+logfile cache.
 
 ex.:
 

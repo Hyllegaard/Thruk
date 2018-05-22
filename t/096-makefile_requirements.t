@@ -9,6 +9,7 @@ my $replace = {
     'Monitoring::Availability::Logs'              => 'Monitoring::Availability',
     'Date::Calc::XS'                              => 'Date::Calc',
     'Template::Context'                           => 'Template',
+    'Template::Exception'                         => 'Template',
     'Hash::MultiValue'                            => 'Plack',
     'Plack::Response'                             => 'Plack',
     'Plack::Request'                              => 'Plack',
@@ -36,6 +37,7 @@ for my $file (@{$files}) {
     next if _is_core_module($mod);
     $all_used->{$mod} = 1;
     next if $mod eq 'IO::Socket::SSL'; # optional
+    next if $mod eq 'Clone'; # optional
     next if $mod eq 'DBI' and defined $reqs->{'mysql_support'}->{$mod};
     next if $mod eq 'HTML::Escape' and defined $reqs->{'performance_tweaking'}->{$mod};
     $mod = $replace->{$mod} if defined $replace->{$mod};

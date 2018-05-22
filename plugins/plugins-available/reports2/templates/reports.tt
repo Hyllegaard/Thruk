@@ -2,7 +2,7 @@
 [% PROCESS _message.tt %]
 [% USE date %]
 
-<table border="0" width="100%" cellspacing="0" cellpadding="0">
+<table border="0" width="100%" cellspacing="0" cellpadding="0" class="infoboxrow">
   <tr>
     <td align="left" valign="top" width="20%">
       [% PROCESS _infobox.tt %]
@@ -170,7 +170,9 @@
     else                     { jQuery('#view1').prop('checked', true) }
     init_report_tool_buttons();
     [% IF highlight %]
-    jQuery('TR.report[% highlight +%] TD').effect('highlight', {}, 2000);
+    jQuery('TR.report[% highlight +%] TD').effect('highlight', {}, 2000, function() {
+      reports_view(typ);
+    });
     if(typ == 'my') {
       // filter again, otherwise the owner cell would be displayed after hilighting
       reports_view(typ);
@@ -180,3 +182,5 @@
   });
 -->
 </script>
+
+[% PROCESS _footer.tt %]

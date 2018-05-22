@@ -47,6 +47,11 @@ function add_conf_attribute(table, key, rt) {
     // insert row at 3rd last position
     tblBody.insertBefore(newObj, tblBody.rows[tblBody.rows.length -3]);
 
+    // force set name of input field, not only onchange, otherwise preset customvariables from extra_custom_var might now work
+    if(key == 'customvariable') {
+        jQuery('.obj_' + running_number).attr('name', 'obj.'+value);
+    }
+
     reset_table_row_classes(table, 'dataEven', 'dataOdd');
 
     // otherwise button icons are missing
@@ -193,16 +198,6 @@ function init_conf_tool_buttons() {
         return false;
     });
 
-    /* list wizard */
-    jQuery('button.members_wzd_button').button({
-        icons: {primary: 'ui-wzd-button'},
-        text: false,
-        label: 'open list wizard'
-    }).click(function() {
-        init_conf_tool_list_wizard(this.id, this.name);
-        return false;
-    });
-
     jQuery('TD.attrValue').button();
     return;
 }
@@ -223,8 +218,8 @@ function init_conf_tool_command_wizard(id) {
       .dialog({
         dialogClass: 'dialogWithDropShadow',
         autoOpen:    false,
-        width:       642,
-        position:   'top',
+        closeOnEscape: false,
+        width:       750,
         close:       function(event, ui) { do_command_line_updates=0; ajax_search.hide_results(undefined, 1); return true; }
     });
     jQuery('#' + id + 'accept').button({
@@ -246,7 +241,7 @@ function init_conf_tool_command_wizard(id) {
 
     last_cmd_name_value = '';
     do_command_line_updates=1;
-    update_command_line(id, cmd_name);
+    update_command_line(id);
 
     return;
 }
@@ -300,23 +295,7 @@ function update_command_line(id) {
             token:   user_token
         },
         success: function(data) {
-            hideElement(id + 'wait');
-            var cmd_line = data[0].cmd_line;
-            for(var nr=1;nr<=100;nr++) {
-                var regex = new RegExp('\\$ARG'+nr+'\\$', 'g');
-                cmd_line = cmd_line.replace(regex, "<\/td><td><input type='text' id='"+id+"arg"+nr+"' class='cmd_line_inp_wzd "+id+"arg"+nr+"' size=15 value='' onclick=\"ajax_search.init(this, 'macro', {url:'conf.cgi?action=json&amp;type=macro&amp;withuser=1&plugin=', append_value_of:'"+id+"inp_command', hideempty:true, list:'[ =\\\']'})\" onkeyup='update_other_inputs(this)'><\/td><td>");
-            }
-
-            cmd_line = cmd_line.replace(/\ \-/g, "<\/td><\/tr><\/table><table class='command_line_wzd'><tr><td>-");
-            cmd_line = "<table class='command_line_wzd first'><tr><td>"+cmd_line+"<\/td><\/tr><\/table>"
-            cmd_line = cmd_line.replace(/<td>\s*<\/td>/g, "");
-            document.getElementById(id + 'command_line').innerHTML = cmd_line;
-
-            // now set the values to avoid escaping
-            for(var nr=1;nr<=100;nr++) {
-                jQuery('.'+id+'arg'+nr).val(args[nr-1]);
-            }
-
+            updateCommandLine(id, data[0].cmd_line, args);
             close_accordion();
         },
         error: function() {
@@ -326,6 +305,32 @@ function update_command_line(id) {
     });
 
     window.setTimeout("update_command_line('"+id+"')", 300);
+}
+
+function updateCommandLine(id, cmd_line, args, disabled) {
+    hideElement(id + 'wait');
+    for(var nr=1;nr<=100;nr++) {
+        var tr = "";
+        if(nr > 0 && nr%3 == 0) {
+            tr = '<\/tr><tr>';
+        }
+        var regex = new RegExp('\\$ARG'+nr+'\\$', 'g');
+        cmd_line = cmd_line.replace(regex, "<\/td><td><input type='text' id='"+id+"arg"+nr+"' class='cmd_line_inp_wzd "+id+"arg"+nr+"' size=15 value='' onclick=\"ajax_search.init(this, 'macro', {url:'conf.cgi?action=json&amp;type=macro&amp;withuser=1&plugin=', append_value_of:'"+id+"inp_command', hideempty:true, list:'[ =\\\']'})\" onkeyup='update_other_inputs(this)'><\/td>"+tr+"<td>");
+    }
+
+    cmd_line = cmd_line.replace(/(\ |\n)\-/g, "<\/td><\/tr><\/table><table class='command_line_wzd'><tr><td>-");
+    cmd_line = "<table class='command_line_wzd first'><tr><td>"+cmd_line+"<\/td><\/tr><\/table>"
+    cmd_line = cmd_line.replace(/<td>\s*<\/td>/g, "");
+    document.getElementById(id + 'command_line').innerHTML = cmd_line;
+
+    // now set the values to avoid escaping
+    for(var nr=1;nr<=100;nr++) {
+        if(disabled) {
+            jQuery('.'+id+'arg'+nr).val("$ARG"+nr+"$").attr("disabled", true);
+        } else {
+            jQuery('.'+id+'arg'+nr).val(args[nr-1]);
+        }
+    }
 }
 
 function collect_args(id) {
@@ -366,8 +371,11 @@ function init_conf_tool_plugin_wizard(id) {
     var cmd_line   = document.getElementById(cmd_inp_id).value;
     document.getElementById(id + "inp_args").value = '';
     var index = cmd_line.indexOf(" ");
+    var args;
     if(index != -1) {
-        var args = cmd_line.substr(index + 1);
+        args = cmd_line.substr(index + 1);
+        // format args nicely
+        args = args.replace(/\s+(\-|>)/g, "\n    $1");
         document.getElementById(id + "inp_args").value = args;
         cmd_line = cmd_line.substr(0, index);
     };
@@ -377,9 +385,9 @@ function init_conf_tool_plugin_wizard(id) {
       .dialog({
         dialogClass: 'dialogWithDropShadow',
         autoOpen:    false,
+        closeOnEscape: false,
         width:       'auto',
         maxWidth:    1024,
-        position:    'top',
         close:       function(event, ui) { ajax_search.hide_results(undefined, 1); return true; }
     });
     jQuery('#' + id + 'accept').button({
@@ -397,10 +405,20 @@ function init_conf_tool_plugin_wizard(id) {
     });
 
     init_plugin_help_accordion(id);
+    update_command_preview(id);
 
     $d.dialog('open');
 
     return;
+}
+
+function update_command_preview(id) {
+    id = id.replace(/_$/, '')+"_";
+    var cmd_line = document.getElementById(id+'inp_plugin').value;
+    if(document.getElementById(id+'inp_args').value != '') {
+        cmd_line = cmd_line + " " + document.getElementById(id+'inp_args').value
+    }
+    updateCommandLine(id, cmd_line, [], true);
 }
 
 var $accordion;
@@ -536,112 +554,6 @@ function close_accordion() {
     }
 }
 
-/* handle list wizard dialog */
-var available_members = new Array();
-var selected_members  = new Array();
-var init_conf_tool_list_wizard_initialized = {};
-function init_conf_tool_list_wizard(id, type) {
-    id = id.substr(0, id.length -3);
-    var tmp       = type.split(/,/);
-    var input_id  = tmp[0];
-    type          = tmp[1];
-    var aggregate = Math.abs(tmp[2]);
-    var templates = tmp[3] ? true : false;
-
-    var $d = jQuery('#' + id + 'dialog')
-      .dialog({
-        dialogClass: 'dialogWithDropShadow',
-        autoOpen:    false,
-        width:       'auto',
-        maxWidth:    1024,
-        position:    'top',
-        close:       function(event, ui) { ajax_search.hide_results(undefined, 1); return true; }
-    });
-
-    // initialize selected members
-    selected_members   = new Array();
-    selected_members_h = new Object();
-    var options = [];
-    var list = jQuery('#'+input_id).val().split(/\s*,\s*/);
-    for(var x=0; x<list.length;x+=aggregate) {
-        if(list[x] != '') {
-            var val = list[x];
-            for(var y=1; y<aggregate;y++) {
-                val = val+','+list[x+y]
-            }
-            selected_members.push(val);
-            selected_members_h[val] = 1;
-            options.push(new Option(val, val));
-        }
-    }
-    set_select_options(id+"selected_members", options, true);
-    sortlist(id+"selected_members");
-    reset_original_options(id+"selected_members");
-
-    // initialize available members
-    available_members = new Array();
-    jQuery("select#"+id+"available_members").html('<option disabled>loading...<\/option>');
-    jQuery.ajax({
-        url: 'conf.cgi?action=json&amp;type='+type,
-        type: 'POST',
-        success: function(data) {
-            var result = data[0]['data'];
-            if(templates) {
-                result = data[1]['data'];
-            }
-            var options = [];
-            var size = result.length;
-            for(var x=0; x<size;x++) {
-                if(!selected_members_h[result[x]]) {
-                    available_members.push(result[x]);
-                    options.push(new Option(result[x], result[x]));
-                }
-            }
-            set_select_options(id+"available_members", options, true);
-            sortlist(id+"available_members");
-            reset_original_options(id+"available_members");
-        },
-        error: function() {
-            jQuery("select#"+id+"available_members").html('<option disabled>error<\/option>');
-        }
-    });
-
-    // button has to be initialized only once
-    if(init_conf_tool_list_wizard_initialized[id] != undefined) {
-        // reset filter
-        jQuery('INPUT.filter_available').val('');
-        jQuery('INPUT.filter_selected').val('');
-        data_filter_select(id+'available_members', '');
-        data_filter_select(id+'selected_members', '');
-        $d.dialog('open');
-        return;
-    }
-    init_conf_tool_list_wizard_initialized[id] = true;
-
-    jQuery('#' + id + 'accept').button({
-        icons: {primary: 'ui-ok-button'}
-    }).click(function() {
-        data_filter_select(id+'available_members', '');
-        data_filter_select(id+'selected_members', '');
-
-        var newval = '';
-        var lb = document.getElementById(id+"selected_members");
-        for(i=0; i<lb.length; i++)  {
-            newval += lb.options[i].value;
-            if(i < lb.length-1) {
-                newval += ',';
-            }
-        }
-        jQuery('#'+input_id).val(newval);
-        ajax_search.hide_results(undefined, 1);
-        $d.dialog('close');
-        return false;
-    });
-
-    $d.dialog('open');
-    return;
-}
-
 /* filter already displayed attributes */
 function new_attr_filter(str) {
     if(jQuery('#new_'+str+'_btn').css('display') == 'none') {
@@ -662,6 +574,7 @@ function on_attr_select() {
     }
     window.setTimeout(function() {
         ajax_search.hide_results(null, 1);
+        if(!document.getElementById(newid)) { return; }
         jQuery(newid).focus();
         /* move cursor to end of input */
         setCaretToPos(jQuery(newid)[0], jQuery(newid).val().length);
@@ -685,7 +598,11 @@ function on_empty_click(inp) {
     if(td.value.substr(0,1) != '_') {
         td.value = '_' + td.value;
     }
-    newin.name = 'obj.'+td.value;
+    var value_input_id = newid.replace(/_key$/, '');
+    var value_input    = document.getElementById(value_input_id);
+    if(value_input) {
+        value_input.name = 'obj.'+td.value;
+    }
     return false;
 }
 
@@ -701,18 +618,32 @@ function conf_validate_object_form(f) {
 }
 
 /* if form id is set, append own form value to remote form and submit merged */
-function save_reload_apply(formid) {
+function save_reload_apply(btn, formid, name) {
+    if(!name) { name = "save_and_reload"; }
     if(!formid) { return true; }
     var remoteform = document.getElementById(formid);
-    if(!remoteform) { return true; }
-    var input = jQuery("<input>", { type: "hidden", name: "save_and_reload", value: "1" });
-    jQuery(remoteform).append(jQuery(input));
-    if(remoteform.onsubmit()) {
-        // does not work in firefox (only after removing an attribute)
-        //debug(remoteform.submit());
-        jQuery('button.conf_apply_button')[0].click();
+    if(!remoteform) {
+        remoteform = jQuery(btn).closest('FORM');
     }
+    jQuery(btn).button({
+        icons: {primary: 'ui-waiting-button'}
+    });
+    window.setTimeout(function() {
+        jQuery(btn).button({
+            icons: {primary: 'ui-error-button'}
+        });
+    }, 30000);
+    conf_prompt_change_summary(remoteform, function() {
+        var input = jQuery("<input>", { type: "submit", name: name, value: "1", style: "visibility: hidden;" });
+        jQuery(remoteform).append(jQuery(input));
+        input.click();
+        return false;
+    });
     return false;
+}
+
+function save_apply(btn, formid) {
+    return(save_reload_apply(btn, formid, "save"));
 }
 
 var continue_cb;
@@ -795,4 +726,32 @@ function conf_tool_cleanup(btn, link, hide) {
     });
 
     return(false);
+}
+
+function conf_prompt_change_summary(remoteform, callback) {
+    if(!show_commit_summary_prompt) {
+        return(callback());
+    }
+    jQuery("#summary-dialog-form").dialog({
+        autoOpen: true,
+        modal: true,
+        title: 'Enter Change Summary',
+        width: 500,
+        buttons: {
+            "Ok": function() {
+                var input = jQuery("<input>", { type: "hidden", name: "summary", value: jQuery("#summary-text").val() });
+                jQuery(remoteform).append(jQuery(input));
+
+                var input = jQuery("<input>", { type: "hidden", name: "summarydesc", value: jQuery("#summary-desc").val() });
+                jQuery(remoteform).append(jQuery(input));
+
+                jQuery(this).dialog("close");
+                return(callback());
+            },
+            "Cancel": function() {
+                jQuery(this).dialog("close");
+            }
+        }
+    });
+    return(true);
 }

@@ -27,6 +27,7 @@ sub index {
 
     # Safe Defaults required for changing backends
     return unless Thruk::Action::AddDefaults::add_defaults($c, Thruk::ADD_SAFE_DEFAULTS);
+    #&timing_breakpoint('index start');
 
     if(!$c->config->{'conf_modules_loaded'}) {
         load Thruk::Utils::Conf;
@@ -34,14 +35,16 @@ sub index {
         load Monitoring::Config;
         load Socket, qw/inet_ntoa/;
         load File::Copy;
-        load JSON::XS;
+        load Cpanel::JSON::XS;
         load Storable, qw/dclone/;
         load Data::Dumper, qw/Dumper/;
         load File::Slurp, qw/read_file/;
         load Encode, qw(decode_utf8 encode_utf8);
         load Digest::MD5, qw(md5_hex);
+        load Thruk::Utils::Plugin;
         $c->config->{'conf_modules_loaded'} = 1;
     }
+    #&timing_breakpoint('index modules loaded');
 
     my $subcat = $c->req->parameters->{'sub'}    || '';
     my $action = $c->req->parameters->{'action'} || 'show';
@@ -79,6 +82,8 @@ sub index {
     $c->stash->{'has_refs'}            = 0;
     $c->stash->{'link_obj'}            = \&Thruk::Utils::Conf::_link_obj;
     $c->stash->{no_tt_trim}            = 1;
+    $c->stash->{post_obj_save_cmd}     = $c->config->{'Thruk::Plugin::ConfigTool'}->{'post_obj_save_cmd'}   // '';
+    $c->stash->{show_summary_prompt}   = $c->config->{'Thruk::Plugin::ConfigTool'}->{'show_summary_prompt'} // 1;
 
     Thruk::Utils::ssi_include($c);
 
@@ -102,6 +107,7 @@ sub index {
     $c->stash->{conf_config}  = $c->config->{'Thruk::Plugin::ConfigTool'} || {};
     $c->stash->{has_obj_conf} = scalar keys %{Thruk::Utils::Conf::get_backends_with_obj_config($c)};
 
+    #&timing_breakpoint('index starting subs');
     # set default
     $c->stash->{conf_config}->{'show_plugin_syntax_helper'} = 1 unless defined $c->stash->{conf_config}->{'show_plugin_syntax_helper'};
 
@@ -140,6 +146,7 @@ sub index {
         $c->stash->{'parse_errors'} = $c->{'obj_db'}->{'parse_errors'};
     }
 
+    #&timing_breakpoint('index done');
     return 1;
 }
 
@@ -173,18 +180,15 @@ sub _process_json_page {
     if($type eq 'icon') {
         my $objects = [];
         my $themes_dir = $c->config->{'themes_path'} || $c->config->{'home'}."/themes";
-        my $dir        = $c->config->{'physical_logo_path'} || $themes_dir."/themes-available/Thruk/images/logos";
-        $dir =~ s/\/$//gmx;
-        if(!-d $dir.'/.') {
-            # try to create that folder, it might not exist yet
-            eval {
-                Thruk::Utils::IO::mkdir_r($dir);
-            };
-        }
-        my $files = _find_files($c, $dir, '\.(png|gif|jpg)$');
-        for my $file (@{$files}) {
-            $file =~ s/$dir\///gmx;
-            push @{$objects}, $file." - ".$c->stash->{'logo_path_prefix'}.$file;
+        my $icon_dirs  = Thruk::Utils::list($c->config->{'physical_logo_path'} || $themes_dir."/themes-available/Thruk/images/logos");
+        for my $dir (@{$icon_dirs}) {
+            $dir =~ s/\/$//gmx;
+            next unless -d $dir.'/.';
+            my $files = _find_files($c, $dir, '\.(png|gif|jpg)$');
+            for my $file (@{$files}) {
+                $file =~ s/$dir\///gmx;
+                push @{$objects}, $file." - ".$c->stash->{'logo_path_prefix'}.$file;
+            }
         }
         my $json = [ { 'name' => $type.'s', 'data' => $objects } ];
         return $c->render(json => $json);
@@ -507,7 +511,8 @@ sub _process_thruk_page {
                         use_wait_feature
                         wait_timeout
                         use_frames
-                        use_timezone
+                        server_timezone
+                        default_user_timezone
                         use_strict_host_authorization
                         show_long_plugin_output
                         info_popup_event_type
@@ -692,12 +697,17 @@ sub _process_plugins_page {
         $c->stash->{'readonly'}  = 1;
     }
 
+    my $plugins = Thruk::Utils::Plugin::get_plugins($c);
+
     if($c->stash->{action} eq 'preview') {
         my $pic = $c->req->parameters->{'pic'} || die("missing pic");
         if($pic !~ m/^[a-zA-Z0-9_\ \-]+$/gmx) {
             die("unknown pic: ".$pic);
         }
-        my $path = $plugin_available_dir.'/'.$pic.'/preview.png';
+        my $path = $plugin_enabled_dir.'/'.$pic.'/preview.png';
+        if(!-e $path) {
+            $path = $plugin_available_dir.'/'.$pic.'/preview.png';
+        }
         $c->res->headers->content_type('image/png');
         $c->stash->{'text'} = "";
         if(-e $path) {
@@ -718,46 +728,17 @@ sub _process_plugins_page {
         }
         else {
             for my $addon (glob($plugin_available_dir.'/*/')) {
-                my($addon_name, $dir) = _nice_addon_name($addon);
+                my($addon_name, $dir) = Thruk::Utils::Plugin::nice_addon_name($addon);
                 if(!defined $c->req->parameters->{'plugin.'.$dir} || $c->req->parameters->{'plugin.'.$dir} == 0) {
-                    unlink($plugin_enabled_dir.'/'.$dir);
+                    Thruk::Utils::Plugin::disable_plugin($c, $dir) if $plugins->{$dir}->{'enabled'};
                 }
                 if(defined $c->req->parameters->{'plugin.'.$dir} and $c->req->parameters->{'plugin.'.$dir} == 1) {
-                    if(!-e $plugin_enabled_dir.'/'.$dir) {
-                        my $plugin_src_dir = $plugin_available_dir.'/'.$dir;
-                        # make nicer and maintainable symlinks by not using absolute paths if possible
-                        if(-d $plugin_enabled_dir.'/../plugins-available/'.$dir) {
-                            $plugin_src_dir = '../plugins-available/'.$dir;
-                        }
-                        elsif($ENV{'OMD_ROOT'}) {
-                            $plugin_src_dir = '../../../share/thruk/plugins/plugins-available/'.$dir;
-                        }
-                        symlink($plugin_src_dir,
-                                $plugin_enabled_dir.'/'.$dir)
-                            or die("cannot create ".$plugin_enabled_dir.'/'.$dir." : ".$!);
-                    }
+                    Thruk::Utils::Plugin::enable_plugin($c, $dir) unless $plugins->{$dir}->{'enabled'};
                 }
             }
             Thruk::Utils::set_message( $c, 'success_message', 'Plugins changed successfully.' );
             return Thruk::Utils::restart_later($c, $c->stash->{url_prefix}.'cgi-bin/conf.cgi?sub=plugins&reload_nav=1');
         }
-    }
-
-    my $plugins = {};
-    for my $addon (glob($plugin_available_dir.'/*/')) {
-        my($addon_name, $dir) = _nice_addon_name($addon);
-        $plugins->{$addon_name} = { enabled => 0, dir => $dir, description => '(no description available.)', url => '' };
-        if(-e $plugin_available_dir.'/'.$dir.'/description.txt') {
-            my $description = read_file($plugin_available_dir.'/'.$dir.'/description.txt');
-            my $url         = "";
-            if($description =~ s/^Url:\s*(.*)$//gmx) { $url = $1; }
-            $plugins->{$addon_name}->{'description'} = $description;
-            $plugins->{$addon_name}->{'url'}         = $url;
-        }
-    }
-    for my $addon (glob($plugin_enabled_dir.'/*/')) {
-        my($addon_name, $dir) = _nice_addon_name($addon);
-        $plugins->{$addon_name}->{'enabled'} = 1;
     }
 
     $c->stash->{'plugins'}  = $plugins;
@@ -796,10 +777,15 @@ sub _process_backends_page {
             return $c->redirect_to('conf.cgi?sub=backends');
         }
 
-        my $x=0;
+        my $numbers = [];
+        for my $key (sort keys %{$c->req->parameters}) {
+            if($key =~ m/^name(\d+)/mx) {
+                push @{$numbers}, $1;
+            }
+        }
         my $backends = [];
         my $new = 0;
-        while(defined $c->req->parameters->{'name'.$x}) {
+        for my $x (sort { $a <=> $b } @{$numbers}) {
             my $backend = {
                 'name'    => $c->req->parameters->{'name'.$x},
                 'type'    => $c->req->parameters->{'type'.$x},
@@ -832,7 +818,7 @@ sub _process_backends_page {
                 $backend->{'options'}->{'fallback_peer'} = $peer->{'config'}->{'options'}->{'fallback_peer'} if defined $peer->{'config'}->{'options'}->{'fallback_peer'};
                 $backend->{'groups'}     = $peer->{'groups'}     if defined $peer->{'groups'};
                 $backend->{'configtool'} = $peer->{'configtool'} if defined $peer->{'configtool'};
-                $backend->{'state_host'} = $peer->{'state_host'} if defined $peer->{'state_host'};
+                $backend->{'state_host'} = $peer->{'config'}->{'state_host'} if defined $peer->{'config'}->{'state_host'};
             }
             $new = 1 if $x == 1;
             push @{$backends}, $backend;
@@ -853,6 +839,7 @@ sub _process_backends_page {
         my $remote_name = $c->req->parameters->{'remote_name'};
         my @test;
         eval {
+            local $ENV{'THRUK_USE_LMD'} = "";
             my $con = Thruk::Backend::Peer->new({
                                                  type    => $type,
                                                  name    => 'test connection',
@@ -929,6 +916,15 @@ sub _process_objects_page {
     $c->stash->{'coretype'}         = $c->{'obj_db'}->{'coretype'};
     $c->stash->{'bare'}             = $c->req->parameters->{'bare'} || 0;
     $c->stash->{'has_history'}      = 0;
+
+    # start editing files
+    if(defined $c->req->parameters->{'start_edit'}) {
+        my $file = Thruk::Utils::Conf::start_file_edit($c, $c->req->parameters->{'start_edit'});
+        if($file) {
+            return $c->render(json => {'ok' => 1, md5 => $file->{'md5'} });
+        }
+        return $c->render(json => {'ok' => 0 });
+    }
 
     $c->{'obj_db'}->read_rc_file();
 
@@ -1120,6 +1116,9 @@ sub _apply_config_changes {
     $c->stash->{'template'}      = 'conf_objects_apply.tt';
     $c->stash->{'output'}        = '';
     $c->stash->{'changed_files'} = $c->{'obj_db'}->get_changed_files();
+
+    local $ENV{'THRUK_SUMMARY_MESSAGE'} = $c->req->parameters->{'summary'}     if $c->req->parameters->{'summary'};
+    local $ENV{'THRUK_SUMMARY_DETAILS'} = $c->req->parameters->{'summarydesc'} if $c->req->parameters->{'summarydesc'};
 
     if(defined $c->req->parameters->{'save_and_reload'}) {
         return unless Thruk::Utils::check_csrf($c);
@@ -1363,17 +1362,9 @@ sub _process_user_password_page {
 sub _get_tools {
     my ($c) = @_;
 
-    my $modules = {};
-    for my $folder (@INC) {
-        next unless -d $folder;
-        for my $file (glob($folder.'/Thruk/Utils/Conf/Tools/*.pm')) {
-            $file =~ s|^\Q$folder/\E||gmx;
-            $modules->{$file} = 1;
-        }
-    }
-
-    my $tools = {};
-    for my $file (keys %{$modules}) {
+    my $modules = Thruk::Utils::find_modules('/Thruk/Utils/Conf/Tools/*.pm');
+    my $tools   = {};
+    for my $file (@{$modules}) {
         require $file;
         my $class = $file;
         $class    =~ s|/|::|gmx;
@@ -1780,8 +1771,8 @@ sub _set_files_stash {
     }
 
     # no encoding here, filenames are encoded already
-    $c->stash->{'filenames_json'} = JSON::XS->new->encode([{ name => 'files', data => [ sort @filenames ]}]);
-    $c->stash->{'files_json'}     = JSON::XS->new->encode($files_tree);
+    $c->stash->{'filenames_json'} = Cpanel::JSON::XS->new->encode([{ name => 'files', data => [ sort @filenames ]}]);
+    $c->stash->{'files_json'}     = Cpanel::JSON::XS->new->encode($files_tree);
     $c->stash->{'files_tree'}     = $files_tree;
 
     return $files_root;
@@ -2119,6 +2110,7 @@ sub _file_save {
         $c->{'obj_db'}->_rebuild_index();
         my $files_root                   = _set_files_stash($c, 1);
         $c->{'obj_db'}->{'needs_commit'} = 1;
+        $c->stash->{'obj_model_changed'} = 1;
         $c->stash->{'file_name'}         = $file->{'display'};
         $c->stash->{'file_name'}         =~ s/^$files_root//gmx;
         if(scalar @{$file->{'errors'}} > 0) {
@@ -2210,7 +2202,7 @@ sub _file_history {
 
     my $logs = _get_git_logs($c, $dir);
 
-    Thruk::Backend::Manager::_page_data(undef, $c, $logs);
+    Thruk::Backend::Manager::page_data($c, $logs);
     $c->stash->{'logs'} = $logs;
     $c->stash->{'dir'}  = $dir;
     return;
@@ -2417,10 +2409,12 @@ sub _list_references {
 ##########################################################
 sub _config_check {
     my($c) = @_;
+    my $obj_check_cmd = $c->stash->{'peer_conftool'}->{'obj_check_cmd'};
+    $obj_check_cmd = $obj_check_cmd.' 2>&1' if($obj_check_cmd && $obj_check_cmd !~ m|>|mx);
     if($c->{'obj_db'}->is_remote() && $c->{'obj_db'}->remote_config_check($c)) {
         Thruk::Utils::set_message( $c, 'success_message', 'config check successfull' );
     }
-    elsif(!$c->{'obj_db'}->is_remote() && _cmd($c, $c->stash->{'peer_conftool'}->{'obj_check_cmd'})) {
+    elsif(!$c->{'obj_db'}->is_remote() && _cmd($c, $obj_check_cmd)) {
         Thruk::Utils::set_message( $c, 'success_message', 'config check successfull' );
     } else {
         Thruk::Utils::set_message( $c, 'fail_message', 'config check failed!' );
@@ -2435,12 +2429,19 @@ sub _config_check {
 ##########################################################
 sub _config_reload {
     my($c) = @_;
+    $c->stats->profile(begin => "conf::_config_reload");
 
     my $time = time();
     my $name = $c->stash->{'param_backend'};
     my $peer = $c->{'db'}->get_peer_by_key($name);
     my $pkey = $peer->peer_key();
     my $wait = 1;
+
+    my $last_reload = $c->stash->{'pi_detail'}->{$pkey}->{'program_start'};
+    if(!$last_reload) {
+        my $processinfo = $c->{'db'}->get_processinfo(backends => $pkey);
+        $last_reload = $processinfo->{$pkey}->{'program_start'} || (time() - 1);
+    }
 
     if($c->stash->{'peer_conftool'}->{'obj_reload_cmd'}) {
         if($c->{'obj_db'}->is_remote() && $c->{'obj_db'}->remote_config_reload($c)) {
@@ -2462,7 +2463,7 @@ sub _config_reload {
         # restart by livestatus
         die("no backend found by name ".$name) unless $peer;
         my $options = {
-            'command' => sprintf("COMMAND [%d] RESTART_PROCESS", time()),
+            'command' => sprintf("COMMAND [%d] RESTART_PROCESS", $time),
             'backend' => [ $pkey ],
         };
         $c->{'db'}->send_command( %{$options} );
@@ -2471,7 +2472,7 @@ sub _config_reload {
 
     # wait until core responds again
     if($wait) {
-        if(!Thruk::Utils::wait_after_reload($c, $pkey, $time-1)) {
+        if(!Thruk::Utils::wait_after_reload($c, $pkey, $last_reload)) {
             $c->stash->{'output'} .= "\n<font color='red'>Warning: waiting for core reload failed.</font>";
         }
     }
@@ -2479,6 +2480,7 @@ sub _config_reload {
     # reload navigation, probably some names have changed
     $c->stash->{'reload_nav'} = 1;
 
+    $c->stats->profile(end => "conf::_config_reload");
     return;
 }
 
@@ -2513,17 +2515,6 @@ sub _check_external_reload {
         }
     }
     return;
-}
-
-##########################################################
-# return nicer addon name
-sub _nice_addon_name {
-    my($name) = @_;
-    my $dir = $name;
-    $dir =~ s/\/+$//gmx;
-    $dir =~ s/^.*\///gmx;
-    my $nicename = join(' ', map(ucfirst, split(/_/mx, $dir)));
-    return($nicename, $dir);
 }
 
 ##########################################################

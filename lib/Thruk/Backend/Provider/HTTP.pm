@@ -4,7 +4,7 @@ use strict;
 use warnings;
 use Data::Dumper;
 use Module::Load qw/load/;
-use JSON::XS qw/decode_json encode_json/;
+use Cpanel::JSON::XS qw/decode_json encode_json/;
 use parent 'Thruk::Backend::Provider::Base';
 
 =head1 NAME
@@ -33,7 +33,7 @@ sub new {
     my $self = {
         'fast_query_timeout'   => 10,
         'timeout'              => 100,
-        'logs_timeout'         => 100,
+        'logs_timeout'         => 300,
         'config'               => $config,
         'peerconfig'           => $peerconfig,
         'product_prefix'       => $product_prefix,
@@ -99,6 +99,19 @@ sub peer_name {
         $self->{'name'} = $new_val;
     }
     return $self->{'name'};
+}
+
+##########################################################
+
+=head2 _raw_query
+
+send a raw query to the backend
+
+=cut
+sub _raw_query {
+    my($self, $query) = @_;
+    my $res = $self->_req('_raw_query', [$query]);
+    return $res->[2];
 }
 
 ##########################################################
@@ -239,6 +252,22 @@ sub get_processinfo {
         $data->{$self->{'key'}} = delete $data->{$self->{'remotekey'}};
         $data->{$self->{'key'}}->{'peer_key'} = $self->{'key'};
     }
+    return($data, $typ, $size);
+}
+
+##########################################################
+
+=head2 get_sites
+
+  get_sites
+
+returns a list of lmd sites
+
+=cut
+sub get_sites {
+    my($self, @options) = @_;
+    my $res = $self->_req('get_sites', \@options);
+    my($typ, $size, $data) = @{$res};
     return($data, $typ, $size);
 }
 
@@ -481,11 +510,16 @@ returns logfile entries
 =cut
 sub get_logs {
     my($self, @options) = @_;
+
     my %options = @options;
     if(defined $self->{'_peer'}->{'logcache'} && !defined $options{'nocache'}) {
         $options{'collection'} = 'logs_'.$self->peer_key();
         return $self->{'_peer'}->logcache->get_logs(%options);
     }
+
+    # just because we don't cache, doesn't mean our remote site is not allowed to cache
+    delete $options{'nocache'};
+    @options = %options;
 
     my $use_file = 0;
     if($options{'file'}) {
@@ -495,10 +529,8 @@ sub get_logs {
     }
     # increased timeout for logs
     $self->{'ua'} || $self->reconnect();
-    $self->{'ua'}->timeout($self->{'logs_timeout'});
     my $res = $self->_req('get_logs', \@options);
     #my($typ, $size, $data) = @{$res};
-    $self->{'ua'}->timeout($self->{'timeout'});
 
     return(Thruk::Utils::IO::save_logs_to_tempfile($res->[2]), 'file') if $use_file;
     return $res->[2];
@@ -683,6 +715,19 @@ sub get_extra_perf_stats {
 
 ##########################################################
 
+=head2 get_logs_start_end
+
+  get_logs_start_end
+
+returns first and last logfile entry
+
+=cut
+sub get_logs_start_end {
+    return(_get_logs_start_end(@_));
+}
+
+##########################################################
+
 =head2 _get_logs_start_end
 
   _get_logs_start_end
@@ -692,8 +737,21 @@ returns first and last logfile entry
 =cut
 sub _get_logs_start_end {
     my($self, @options) = @_;
+
+    my %options = @options;
+    if(defined $self->{'_peer'}->{'logcache'} && !defined $options{'nocache'}) {
+        $options{'collection'} = 'logs_'.$self->peer_key();
+        return $self->{'_peer'}->logcache->_get_logs_start_end(%options);
+    }
+
+    # just because we don't cache, doesn't mean our remote site is not allowed to cache
+    delete $options{'nocache'};
+    @options = %options;
+
     my $res = $self->_req('_get_logs_start_end', \@options);
-    return($res->[0], $res->[2]);
+    # old thruk versions return the data in index 0 accidently
+    my($start, $end) = @{$res->[2] || $res->[0]};
+    return([$start, $end]);
 }
 
 ##########################################################
@@ -723,6 +781,8 @@ sub _req {
     }
 
     $self->{'ua'} || $self->reconnect();
+    $self->{'ua'}->timeout($self->{'timeout'});
+    $self->{'ua'}->timeout($self->{'logs_timeout'}) if $sub =~ m/logs/gmx;
     my $response = _ua_post_with_timeout(
                         $self->{'ua'},
                         $self->{'addr'},
@@ -745,7 +805,7 @@ sub _req {
         eval {
             $data = decode_json($response->decoded_content);
         };
-        #die($@."\nrequest:\n".Dumper($response)) if $@;
+        die($@."\nrequest:\n".Dumper($response)) if $@;
         die($@."\n") if $@;
         if($data->{'rc'} == 1) {
             my $remote_version = $data->{'version'};
@@ -888,6 +948,9 @@ sub _clean_code_refs {
 sub _format_response_error {
     my($response) = @_;
     my $message = "";
+    if($response->decoded_content && $response->decoded_content =~ m|<h1>(OMD:.*?)</h1>|sxm) {
+        return($1);
+    }
     if($response->decoded_content && $response->decoded_content =~ m|<!\-\-error:(.*?)\-\->|sxm) {
         $message = "\n".$1;
     }

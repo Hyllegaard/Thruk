@@ -42,13 +42,13 @@ create new peer
 =cut
 
 sub new {
-    my($class, $config, $thruk_config, $existing_keys, $use_shadow_naemon) = @_;
+    my($class, $config, $thruk_config, $existing_keys) = @_;
     my $self = {
         'config'        => $config,
         'existing_keys' => $existing_keys,
     };
     bless $self, $class;
-    $self->_initialise_peer($config, $thruk_config, $use_shadow_naemon);
+    $self->_initialise_peer($config, $thruk_config);
     return $self;
 }
 
@@ -76,6 +76,29 @@ return peer name
 sub peer_name {
     my($self) = @_;
     return $self->{'class'}->peer_name();
+}
+
+##########################################################
+
+=head2 peer_list
+
+return peer address list
+
+=cut
+
+sub peer_list {
+    my($self) = @_;
+    if($self->{'peer_list'}) {
+        my $list = [@{$self->{'peer_list'}}];
+        if($self->{'class'}->{'config'}->{'options'}->{'fallback_peer'}) {
+            push @{$list}, $self->{'class'}->{'config'}->{'options'}->{'fallback_peer'};
+        }
+        return($list);
+    }
+    elsif($self->{'class'}->{'config'}->{'options'}->{'fallback_peer'}) {
+        return([$self->{'config'}->{'options'}->{'fallback_peer'}, $self->{'addr'}]);
+    }
+    return([$self->{'addr'}]);
 }
 
 ##########################################################
@@ -129,7 +152,7 @@ sub _create_backend {
 
 ##########################################################
 sub _initialise_peer {
-    my($self, $config, $thruk_config, $use_shadow_naemon) = @_;
+    my($self, $config, $thruk_config) = @_;
 
     my $logcache       = $thruk_config->{'logcache'};
     my $product_prefix = $thruk_config->{'product_prefix'};
@@ -156,7 +179,6 @@ sub _initialise_peer {
     $self->{'last_error'}    = undef;
     $self->{'logcache'}      = undef;
     $self->{'state_host'}    = $config->{'state_host'};
-    $self->{'use_shadow'}    = $config->{'use_shadow'};
 
     # shorten backend id
     my $key = substr(md5_hex($self->{'class'}->peer_addr." ".$self->{'class'}->peer_name), 0, 5);
@@ -187,6 +209,7 @@ sub _initialise_peer {
             $addr =~ s/\/.*$//mx;
         }
         if($self->{'type'} eq 'livestatus') {
+            $addr =~ s/^tls:\/\///mx;
             $addr =~ s/:.*$//mx;
         }
 
@@ -208,31 +231,6 @@ sub _initialise_peer {
         } else {
             $self->{'logcache'} = $logcache;
         }
-    }
-
-    # livestatus booster
-    if($use_shadow_naemon) {
-        if($ENV{'NO_SHADOW_NAEMON'}) {
-            undef $use_shadow_naemon;
-        }
-        elsif(defined $self->{'use_shadow'} && $self->{'use_shadow'} == 0) {
-            undef $use_shadow_naemon;
-        }
-        elsif($self->{'local'} == 1 && (!defined $self->{'use_shadow'} || $self->{'use_shadow'} == 0)) {
-            undef $use_shadow_naemon;
-        }
-        elsif($config->{'type'} ne 'livestatus' && !$config->{'options'}->{'fallback_peer'}) {
-            undef $use_shadow_naemon;
-        }
-    }
-    if($use_shadow_naemon && !$ENV{'NO_SHADOW_NAEMON'}) {
-        $self->{'cacheproxy'} = Thruk::Backend::Provider::Livestatus->new({
-                                                peer      => $use_shadow_naemon.'/'.$self->{'key'}.'/live',
-                                                peer_key  => $self->{'key'},
-                                                #keepalive => 1,
-                                            });
-        $self->{'cacheproxy'}->peer_key($self->{'key'});
-        $self->{'cacheproxy'}->{'naemon_optimizations'} = 1;
     }
 
     return;

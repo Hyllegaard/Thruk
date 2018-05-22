@@ -77,23 +77,38 @@ sub index {
         $host = 'all';
     }
 
-    if($service ne '') {
-        $c->stash->{infoBoxTitle}   = 'Service Notifications';
-        push @{$filter}, { host_name => $host } if $host ne 'all';
-        push @{$filter}, { service_description => $service };
-    }
-    elsif($host ne '') {
+    if($host ne '') {
         $c->stash->{infoBoxTitle}   = 'Host Notifications';
         push @{$filter}, { host_name => $host } if $host ne 'all';
     }
-    elsif($contact ne '') {
+    if($service ne '') {
+        $c->stash->{infoBoxTitle}   = 'Service Notifications';
+        push @{$filter}, { service_description => $service };
+    }
+    if($contact ne '') {
         $c->stash->{infoBoxTitle}   = 'Contact Notifications';
         push @{$filter}, { contact_name => $contact } if $contact ne 'all';
     }
 
+    # additional filters set?
+    my $pattern         = $c->req->parameters->{'pattern'};
+    my $exclude_pattern = $c->req->parameters->{'exclude_pattern'};
+    my $errors = 0;
+    if(defined $pattern and $pattern !~ m/^\s*$/mx) {
+        $errors++ unless(Thruk::Utils::is_valid_regular_expression($c, $pattern));
+        push @{$filter}, { message => { '~~' => $pattern }};
+    }
+    if(defined $exclude_pattern and $exclude_pattern !~ m/^\s*$/mx) {
+        $errors++ unless Thruk::Utils::is_valid_regular_expression($c, $exclude_pattern);
+        push @{$filter}, { message => { '!~~' => $exclude_pattern }};
+    }
+
     push @{$filter}, { class => 3 };
 
-    my $total_filter = Thruk::Utils::combine_filter('-and', $filter);
+    my $total_filter;
+    if($errors == 0) {
+        $total_filter = Thruk::Utils::combine_filter('-and', $filter);
+    }
 
     my $order = "DESC";
     if($oldestfirst) {
@@ -107,7 +122,7 @@ sub index {
         $c->stash->{'log_filter'} = { filter => [$total_filter, Thruk::Utils::Auth::get_auth_filter($c, 'log')],
                                       sort   => {$order => 'time'},
                                     };
-        return Thruk::Utils::External::perl($c, { expr => 'Thruk::Utils::logs2xls($c)', message => 'please stand by while your report is being generated...' });
+        return Thruk::Utils::External::perl($c, { expr => 'Thruk::Utils::logs2xls($c, "notification")', message => 'please stand by while your report is being generated...' });
     } else {
         $c->stats->profile(begin => "notifications::updatecache");
         return if $c->{'db'}->renew_logcache($c);
@@ -118,6 +133,8 @@ sub index {
         $c->stats->profile(end => "notifications::fetch");
     }
 
+    $c->stash->{pattern}          = $pattern         || '';
+    $c->stash->{exclude_pattern}  = $exclude_pattern || '';
     $c->stash->{oldestfirst}      = $oldestfirst;
     $c->stash->{type}             = $type;
     $c->stash->{archive}          = $archive;

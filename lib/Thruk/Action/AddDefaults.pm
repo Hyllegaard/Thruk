@@ -19,7 +19,7 @@ use strict;
 use warnings;
 use Carp qw/confess/;
 use Data::Dumper qw/Dumper/;
-use JSON::XS qw/encode_json/;
+use Cpanel::JSON::XS qw/encode_json/;
 use Scalar::Util qw/weaken/;
 use POSIX ();
 use Thruk::Utils::Filter ();
@@ -49,6 +49,8 @@ use constant {
     DISABLED_CONF    => 5,
     HIDDEN_CONF      => 6,
     UP_CONF          => 7,
+
+    HIDDEN_LMD_PARENT => 8,
 };
 
 ######################################
@@ -98,6 +100,7 @@ sub begin {
     $c->stash->{'show_nav_button'}    = $show_nav_button;
     $c->stash->{'reload_nav'}         = $c->req->parameters->{'reload_nav'} || '';
     $c->stash->{'show_sounds'}        = 0;
+    $c->stash->{'has_debug_options'}  = $c->req->parameters->{'debug'} || 0;
 
     # use pager?
     Thruk::Utils::set_paging_steps($c, $c->config->{'paging_steps'});
@@ -123,7 +126,7 @@ sub begin {
         $c->stash->{additional_template_paths} = [ $c->config->{themes_path}.'/themes-enabled/'.$theme.'/templates' ];
     }
     $c->stash->{all_in_one_css} = 0;
-    if($theme eq 'Thruk') {
+    if($theme eq 'Thruk' || $theme eq 'Thruk2') {
         $c->stash->{all_in_one_css} = 1;
     }
 
@@ -244,14 +247,12 @@ sub begin {
         }
     }
 
-    # bypass shadownaemon by url
-    ## no critic
-    $ENV{'THRUK_USE_SHADOW'} = 1;
-    $ENV{'THRUK_USE_SHADOW'} = 0 if $c->req->parameters->{'nocache'};
-    ## use critic
-
     $c->stash->{'usercontent_folder'} = $c->config->{'home'}.'/root/thruk/usercontent';
-    $c->stash->{'usercontent_folder'} = $ENV{'THRUK_CONFIG'}.'/usercontent'    if $ENV{'THRUK_CONFIG'};
+    # make usercontent folder based on env var if set. But only if it exists. Fallback to standard folder
+    # otherwise except it doesn't exist either. Then better take the later if both do not exist.
+    if($ENV{'THRUK_CONFIG'} && (-d $ENV{'THRUK_CONFIG'}.'/usercontent/.' || !-d $c->stash->{'usercontent_folder'}.'/.')) {
+        $c->stash->{'usercontent_folder'} = $ENV{'THRUK_CONFIG'}.'/usercontent';
+    }
 
     # initialize our backends
     if(!$c->{'db'} ) {
@@ -359,7 +360,7 @@ sub end {
         elsif($c->stash->{page} eq 'extinfo') {
             my $type = $c->req->parameters->{'type'} || 0;
 
-            $c->stash->{'title'} = $c->stash->{'infoBoxTitle'};
+            $c->stash->{'title'} = $c->stash->{'infoBoxTitle'} if $c->stash->{'infoBoxTitle'};
             if($type !~ m/^\d+$/mx) {}
             # host details
             elsif($type == 1) {
@@ -412,21 +413,45 @@ sub add_defaults {
     $c->stash->{'defaults_added'} = 1;
 
     ###############################
+    # timezone settings
+    my $user_tz = $c->stash->{user_data}->{'tz'} || $c->config->{'default_user_timezone'} || "Server Setting";
+    my $timezone;
+    if($user_tz ne 'Server Setting') {
+        if($user_tz eq 'Local Browser') {
+            $timezone = $c->req->cookies->{'thruk_tz'};
+        } else {
+            $timezone = $user_tz;
+        }
+        if($timezone =~ m/^UTC(.+)$/mx) {
+            my $offset = $1*3600;
+            for my $tz (@{Thruk::Utils::get_timezone_data($c)}) {
+                if($tz->{'offset'} == $offset) {
+                    $timezone = $tz->{'text'};
+                    last;
+                }
+            }
+        }
+    }
+    ## no critic
+    if($timezone) {
+        # set users timezone
+        $ENV{'TZ'} = $timezone;
+        POSIX::tzset();
+    } else {
+        # set back to server timezone
+        $c->app->set_timezone();
+    }
+    ## use critic
+    $c->stash->{'user_tz'} = $user_tz;
+
+    ###############################
     $c->stash->{'escape_html_tags'}      = exists $c->config->{'cgi_cfg'}->{'escape_html_tags'}  ? $c->config->{'cgi_cfg'}->{'escape_html_tags'}  : 1;
     $c->stash->{'show_context_help'}     = exists $c->config->{'cgi_cfg'}->{'show_context_help'} ? $c->config->{'cgi_cfg'}->{'show_context_help'} : 0;
     $c->stash->{'info_popup_event_type'} = $c->config->{'info_popup_event_type'} || 'onmouseover';
 
     ###############################
-    $c->stash->{'enable_shinken_features'} = 0;
-    if(exists $c->config->{'enable_shinken_features'}) {
-        $c->stash->{'enable_shinken_features'} = $c->config->{'enable_shinken_features'};
-    }
-
-    ###############################
-    $c->stash->{'enable_icinga_features'} = 0;
-    if(exists $c->config->{'enable_icinga_features'}) {
-        $c->stash->{'enable_icinga_features'} = $c->config->{'enable_icinga_features'};
-    }
+    $c->stash->{'enable_shinken_features'} = $c->config->{'enable_shinken_features'} || 0;
+    $c->stash->{'enable_icinga_features'}  = $c->config->{'enable_icinga_features'}  || 0;
 
     ###############################
     # redirect to error page unless we have a connection
@@ -445,6 +470,7 @@ sub add_defaults {
            or $c->req->path_info =~ m|$product_prefix\/cgi\-bin\/remote\.cgi|mx
            or $c->req->path_info =~ m|$product_prefix\/cgi\-bin\/login\.cgi|mx
            or $c->req->path_info =~ m|$product_prefix\/cgi\-bin\/restricted\.cgi|mx
+           or $c->req->path_info =~ m|$product_prefix\/cgi\-bin\/parts\.cgi|mx
            or $c->req->path_info eq '/'
            or $c->req->path_info eq $product_prefix
            or $c->req->path_info eq $product_prefix.'/docs'
@@ -480,10 +506,6 @@ sub add_defaults {
         $cached_user_data = $c->cache->get->{'users'}->{$c->stash->{'remote_user'}};
     }
     my $cached_data = $c->cache->get->{'global'} || {};
-
-    ###############################
-    # start shadow naemon process on first request
-    Thruk::Utils::Livecache::check_initial_start($c, $c->config);
 
     ###############################
     my($disabled_backends,$has_groups) = _set_enabled_backends($c, undef, $safe, $cached_data);
@@ -602,10 +624,14 @@ sub add_defaults {
     }
 
     ###############################
+    $c->stash->{'require_comments_for_disable_cmds'} = $c->config->{'require_comments_for_disable_cmds'} || 0;
+
+    ###############################
     # user / group specific config?
+    $c->stash->{'contactgroups'} = $c->stash->{'remote_user'} ? [sort keys %{$c->cache->get->{'users'}->{$c->stash->{'remote_user'}}->{'contactgroups'}}] : [];
     if(!$no_config_adjustments && $c->stash->{'remote_user'}) {
         $c->stash->{'config_adjustments'} = {};
-        for my $group (sort keys %{$c->cache->get->{'users'}->{$c->stash->{'remote_user'}}->{'contactgroups'}}) {
+        for my $group (@{$c->stash->{'contactgroups'}}) {
             if(defined $c->config->{'Group'}->{$group}) {
                 # move components one level up
                 if($c->config->{'Group'}->{$group}->{'Component'}) {
@@ -739,6 +765,9 @@ sub set_configs_stash {
     6 = hidden   (overide by config tool)   HIDDEN_CONF
     7 = up       (overide by config tool)   UP_CONF
 
+   override by LMD clients
+    8 = disabled (overide by lmd)           HIDDEN_LMD_PARENT
+
 =cut
 sub _set_possible_backends {
     my ($c,$disabled_backends) = @_;
@@ -757,13 +786,18 @@ sub _set_possible_backends {
             next;
         }
         my $peer = $c->{'db'}->get_peer_by_key($back);
+        if($peer->{disabled} && $peer->{disabled} == HIDDEN_LMD_PARENT) {
+            $c->{'db'}->disable_backend($back);
+            next;
+        }
         $backend_detail{$back} = {
-            'name'       => $peer->{'name'},
-            'addr'       => $peer->{'addr'},
-            'type'       => $peer->{'type'},
-            'disabled'   => $disabled_backends->{$back} || REACHABLE,
-            'running'    => 0,
-            'last_error' => defined $peer->{'last_error'} ? $peer->{'last_error'} : '',
+            'name'        => $peer->{'name'},
+            'addr'        => $peer->{'addr'},
+            'type'        => $peer->{'type'},
+            'disabled'    => $disabled_backends->{$back} || REACHABLE,
+            'running'     => 0,
+            'last_error'  => defined $peer->{'last_error'} ? $peer->{'last_error'} : '',
+            'section'     => $peer->{'section'} || 'Default',
         };
         if(ref $c->stash->{'pi_detail'} eq 'HASH' and defined $c->stash->{'pi_detail'}->{$back}->{'program_start'}) {
             $backend_detail{$back}->{'running'} = 1;
@@ -799,7 +833,7 @@ sub update_site_panel_hashes {
     return unless $backends;
     return if scalar @{$backends} == 0;
 
-    # create hashes used in javascript
+    # create flat list of backend hashes used in javascript
     for my $back (@{$backends}) {
         my $peer = $c->{'db'}->get_peer_by_key($back);
         $initial_backends->{$back} = {
@@ -810,6 +844,9 @@ sub update_site_panel_hashes {
             data_src_version => '',
             program_start    => '',
         };
+        if($peer->{'last_online'}) {
+            $initial_backends->{$back}->{'last_online'} = time() - $peer->{'last_online'};
+        }
         if(ref $c->stash->{'pi_detail'} eq 'HASH' and defined $c->stash->{'pi_detail'}->{$back}) {
             $initial_backends->{$back}->{'version'}          = $c->stash->{'pi_detail'}->{$back}->{'program_version'};
             $initial_backends->{$back}->{'data_src_version'} = $c->stash->{'pi_detail'}->{$back}->{'data_source_version'};
@@ -818,58 +855,7 @@ sub update_site_panel_hashes {
     }
 
     # create sections and subsection for site panel
-    my $sites = {
-        up       => 0,
-        disabled => 0,
-        down     => 0,
-        sections => {},
-        total    => 0,
-    };
-    for my $section (sort keys %{$c->{'db'}->{'sections'}}) {
-        if(!defined $sites->{'sections'}->{$section}) {
-            $sites->{'sections'}->{$section} = { 'up' => 0, 'disabled' => 0, 'down' => 0, 'total' => 0, subsections => {} };
-        }
-        for my $subsection (sort keys %{$c->{'db'}->{'sections'}->{$section}}) {
-            if(!defined $sites->{'sections'}->{$section}->{'subsections'}->{$subsection}) {
-                $sites->{'sections'}->{$section}->{'subsections'}->{$subsection} = { 'up' => 0, 'disabled' => 0, 'down' => 0, 'total' => 0, sites => [] };
-            }
-            for my $bname (sort keys %{$c->{'db'}->{'sections'}->{$section}->{$subsection}}) {
-                for my $p (@{$c->{'db'}->{'sections'}->{$section}->{$subsection}->{$bname}}) {
-                    my $pd = $p->{'key'};
-                    next if(!$backend_detail->{$pd} || $backend_detail->{$pd}->{'disabled'} == DISABLED_CONF);
-                    my $class = 'DOWN';
-                    $class = 'UP'   if $backend_detail->{$pd}->{'running'};
-                    $class = 'DOWN' if $c->stash->{'failed_backends'}->{$pd};
-                    $class = 'DIS'  if $backend_detail->{$pd}->{'disabled'} == HIDDEN_USER;
-                    $class = 'HID'  if $backend_detail->{$pd}->{'disabled'} == HIDDEN_PARAM;
-                    $class = 'HID'  if $c->stash->{'param_backend'} && !(grep {/\Q$pd\E/mx} @{Thruk::Utils::list($c->stash->{'param_backend'})});
-                    $class = 'DIS'  if $backend_detail->{$pd}->{'disabled'} == HIDDEN_CONF;
-                    $class = 'UP'   if($backend_detail->{$pd}->{'disabled'} == UP_CONF && $class ne 'DOWN');
-                    $backend_detail->{$pd}->{'class'} = $class;
-                    my $total_key = lc $class;
-                    if($class eq 'DIS' || $class eq 'HID') {
-                        $total_key = 'disabled';
-                    }
-                    $sites->{'sections'}->{$section}->{'subsections'}->{$subsection}->{$total_key}++;
-                    $sites->{'sections'}->{$section}->{'subsections'}->{$subsection}->{'total'}++;
-                    $sites->{'sections'}->{$section}->{'total'}++;
-                    $sites->{'sections'}->{$section}->{$total_key}++;
-                    $sites->{$total_key}++;
-                    $sites->{'total'}++;
-                    push @{$sites->{'sections'}->{$section}->{'subsections'}->{$subsection}->{'sites'}}, $pd;
-                    $initial_backends->{$pd}->{'cls'} = $class;
-                    my $last_error = ($initial_backends->{$pd}->{'name'} || '').': OK';
-                    if($c->stash->{'failed_backends'}->{$pd}) {
-                        $last_error = $c->stash->{'failed_backends'}->{$pd};
-                    }
-                    if($backend_detail->{$pd}->{'last_error'}) {
-                        $last_error = $backend_detail->{$pd}->{'last_error'};
-                    }
-                    $initial_backends->{$pd}->{'last_error'} = $last_error;
-                }
-            }
-        }
-    }
+    _calculate_section_totals($c, $c->{'db'}->{'sections'}, $backend_detail, $initial_backends);
 
     my $show_sitepanel = 'list';
        if($c->stash->{'sitepanel'} eq 'list')      { $show_sitepanel = 'list'; }
@@ -877,16 +863,72 @@ sub update_site_panel_hashes {
     elsif($c->stash->{'sitepanel'} eq 'collapsed') { $show_sitepanel = 'collapsed'; }
     elsif($c->stash->{'sitepanel'} eq 'off')       { $show_sitepanel = 'off'; }
     elsif($c->stash->{'sitepanel'} eq 'auto') {
-        if(scalar keys %{$sites->{'sections'}} > 1 || scalar @{$backends} >= 50) { $show_sitepanel = 'collapsed'; }
-        elsif(($sites->{sections}->{'Default'}->{'subsections'} && scalar keys %{$sites->{sections}->{'Default'}->{'subsections'}} > 1) || scalar @{$backends} >= 10) { $show_sitepanel = 'panel'; }
+        if($c->{'db'}->{'sections_depth'} > 1 || scalar @{$backends} >= 50) { $show_sitepanel = 'collapsed'; }
+        elsif($c->{'db'}->{'sections'}->{'sub'} || scalar @{$backends} >= 10) { $show_sitepanel = 'panel'; }
         elsif(scalar @{$backends} == 1) { $show_sitepanel = 'off'; }
         else { $show_sitepanel = 'list'; }
     }
 
     $c->stash->{'initial_backends'} = $initial_backends;
     $c->stash->{'show_sitepanel'}   = $show_sitepanel;
-    $c->stash->{'sites'}            = $sites;
+    $c->stash->{'sites'}            = $c->{'db'}->{'sections'};
 
+    # merge all panel in a Default section
+    if($c->stash->{'show_sitepanel'} eq 'panel') {
+        my $sites = $c->stash->{'sites'};
+        if(!$sites->{'sub'} || !$sites->{'sub'}->{'Default'}) {
+            $sites->{'sub'}->{'Default'} = { peers => delete $sites->{'peers'} || [] };
+        }
+    }
+
+    return;
+}
+
+########################################
+sub _calculate_section_totals {
+    my($c, $section, $backend_detail, $initial_backends) = @_;
+    for my $key (qw/up disabled down total/) {
+        $section->{$key} = 0;
+    }
+
+    if($section->{'sub'}) {
+        for my $s (values %{$section->{'sub'}}) {
+            _calculate_section_totals($c, $s, $backend_detail, $initial_backends);
+            for my $key (qw/up disabled down total/) {
+                $section->{$key} += $s->{$key};
+            }
+        }
+    }
+
+    if($section->{'peers'}) {
+        for my $pd (@{$section->{'peers'}}) {
+            next if(!$backend_detail->{$pd} || $backend_detail->{$pd}->{'disabled'} == DISABLED_CONF);
+            my $class = 'DOWN';
+            $class = 'UP'   if $backend_detail->{$pd}->{'running'};
+            $class = 'DOWN' if $c->stash->{'failed_backends'}->{$pd};
+            $class = 'DIS'  if $backend_detail->{$pd}->{'disabled'} == HIDDEN_USER;
+            $class = 'HID'  if $backend_detail->{$pd}->{'disabled'} == HIDDEN_PARAM;
+            $class = 'HID'  if $c->stash->{'param_backend'} && !(grep {/\Q$pd\E/mx} @{Thruk::Utils::list($c->stash->{'param_backend'})});
+            $class = 'DIS'  if $backend_detail->{$pd}->{'disabled'} == HIDDEN_CONF;
+            $class = 'UP'   if($backend_detail->{$pd}->{'disabled'} == UP_CONF && $class ne 'DOWN');
+            $backend_detail->{$pd}->{'class'} = $class;
+            my $total_key = lc $class;
+            if($class eq 'DIS' || $class eq 'HID') {
+                $total_key = 'disabled';
+            }
+            $section->{$total_key}++;
+            $section->{'total'}++;
+            $initial_backends->{$pd}->{'cls'} = $class;
+            my $last_error =  'OK';
+            if($c->stash->{'failed_backends'}->{$pd}) {
+                $last_error = $c->stash->{'failed_backends'}->{$pd};
+            }
+            if($backend_detail->{$pd}->{'last_error'}) {
+                $last_error = $backend_detail->{$pd}->{'last_error'};
+            }
+            $initial_backends->{$pd}->{'last_error'} = $last_error;
+        }
+    }
     return;
 }
 
@@ -971,37 +1013,8 @@ sub set_processinfo {
         $c->stats->profile(begin => "AddDefaults::set_processinfo fetch");
         $processinfo = $c->{'db'}->get_processinfo();
         if(ref $processinfo eq 'HASH') {
-            my $missing_keys = [];
-            for my $peer (@{$c->{'db'}->get_peers()}) {
-                my $key  = $peer->peer_key();
-                my $name = $peer->peer_name();
-                $processinfo->{$key}->{'peer_name'} = $name;
-                if(scalar keys %{$processinfo->{$key}} > 5) {
-                    $cached_data->{'processinfo'}->{$key} = $processinfo->{$key};
-                }
-
-                # check if we have original datasource and core version when using shadownaemon
-                # but only if the backend itself is available
-                if($peer->{'cacheproxy'} && !$cached_data->{'real_processinfo'}->{$key} && !$c->stash->{'failed_backends'}->{$key}) {
-                    push @{$missing_keys}, $key;
-                }
-            }
-            if(scalar @{$missing_keys} > 0) {
-                local $ENV{'THRUK_USE_SHADOW'} = 0;
-                $c->stats->profile(begin => "AddDefaults::set_processinfo fetch shadowed info");
-                my $real_processinfo;
-                eval {
-                    $real_processinfo = $c->{'db'}->get_processinfo(backend => $missing_keys);
-                };
-                $c->log->debug("get_processinfo: ".$@) if $@;
-                if(ref $real_processinfo eq 'HASH') {
-                    for my $k (keys %{$real_processinfo}) {
-                        if(scalar keys %{$real_processinfo->{$k}} > 5) {
-                            $cached_data->{'real_processinfo'}->{$k} = $real_processinfo->{$k};
-                        }
-                    }
-                }
-                $c->stats->profile(end => "AddDefaults::set_processinfo fetch shadowed info");
+            if($ENV{'THRUK_USE_LMD'}) {
+                ($processinfo, $cached_data) = check_federation_peers($c, $processinfo, $cached_data);
             }
         }
         $cached_data->{'processinfo_time'} = time();
@@ -1041,7 +1054,8 @@ sub set_processinfo {
                 'prev_last_program_restart' => time(),
                 'contactgroups'             => $contactgroups,
             };
-            $c->cache->set('users', $c->stash->{'remote_user'}, $cached_user_data) if defined $c->stash->{'remote_user'};
+            $c->stash->{'contactgroups'} = [sort keys %{$contactgroups}];
+            $c->cache->set('users', $c->stash->{'remote_user'}, $cached_user_data);
             $c->log->debug("creating new user cache for ".$c->stash->{'remote_user'});
         }
     }
@@ -1259,6 +1273,95 @@ sub save_debug_information_to_tmp_file {
     Thruk::Utils::set_message( $c, 'success_message fixed', 'Debug Information written to: '.$tmpfile );
     $c->stats->profile(end => "save_debug_information_to_tmp_file");
     return($tmpfile);
+}
+
+########################################
+
+=head2 check_federation_peers
+
+    expand peers if a single backend returns more than one site,
+    for example with lmd federation
+
+=cut
+sub check_federation_peers {
+    my($c, $processinfo, $cached_data) = @_;
+    return($processinfo, $cached_data) if $ENV{'THRUK_USE_LMD_FEDERATION_FAILED'};
+    my $all_sites_info;
+    eval {
+        $all_sites_info = $c->{'db'}->get_sites(backend => ["ALL"]);
+    };
+    if($@) {
+        # may fail for older lmd releases which don't have parent or section information
+        if($@ =~ m/\Qbad request: table sites has no column\E/mx) {
+            $c->log->info("cannot check lmd federation mode, please update LMD.");
+            ## no critic
+            $ENV{'THRUK_USE_LMD_FEDERATION_FAILED'} = 1;
+            ## use critic
+        }
+    }
+    return($processinfo, $cached_data) unless $all_sites_info;
+
+    # add sub federated backends
+    my $existing =  {};
+    my $changed  = 0;
+    for my $row (@{$all_sites_info}) {
+        my $key = $row->{'key'};
+        $existing->{$key} = 1;
+        if(!$Thruk::Backend::Pool::peers->{$key}) {
+            my $parent = $Thruk::Backend::Pool::peers->{$row->{'parent'}};
+            next unless $parent;
+            my $peer = Thruk::Backend::Peer->new({
+                name => $row->{'name'},
+                id   => $key,
+                type => "livestatus",
+                section => $row->{'section'} ? $parent->peer_name().'/'.$row->{'section'} : $parent->peer_name(),
+                options => {
+                    peer => $row->{'addr'},
+                },
+            }, $c->config, {});
+            $peer->{'lmd_fake_backend'} = 1;
+            $Thruk::Backend::Pool::peers->{$peer->{'key'}} = $peer;
+            push @{$Thruk::Backend::Pool::peer_order}, $peer->{'key'};
+            $parent->{'disabled'} = HIDDEN_LMD_PARENT;
+            $changed++;
+        }
+    }
+    # remove exceeding backends
+    my $new_order = [];
+    for my $key (@{$Thruk::Backend::Pool::peer_order}) {
+        my $peer = $Thruk::Backend::Pool::peers->{$key};
+        if(!$peer->{'lmd_fake_backend'}) {
+            push @{$new_order}, $key;
+            next;
+        }
+        if(!$existing->{$key}) {
+            delete $cached_data->{'processinfo'}->{$key};
+            delete $Thruk::Backend::Pool::peers->{$key};
+            $changed++;
+            next;
+        }
+        push @{$new_order}, $key;
+    }
+    if($changed) {
+        $Thruk::Backend::Pool::peer_order = $new_order;
+        $c->db->{'initialized'} = 0;
+        $c->db->init();
+        # fetch missing processinfo
+        $processinfo = $c->{'db'}->get_processinfo();
+        for my $key (keys %{$processinfo}) {
+            $cached_data->{'processinfo'}->{$key} = $processinfo->{$key};
+        }
+    }
+    # set a few extra infos
+    for my $d (@{$all_sites_info}) {
+        my $key = $d->{'key'};
+        my $peer = $Thruk::Backend::Pool::peers->{$key};
+        next unless $peer;
+        for my $col (qw/last_online last_update last_error/) {
+            $peer->{$col} = $d->{$col};
+        }
+    }
+    return($processinfo, $cached_data);
 }
 
 ########################################

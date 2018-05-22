@@ -5,6 +5,8 @@ Ext.define('TP.Panlet', {
     y:         25,
     height:    200,
     width:     400,
+    minSettingsWidth:  450,
+    minSettingsHeight: 200,
     layout:    'fit',
     constrain: false,
     hideMode:  'visibility',
@@ -249,13 +251,7 @@ Ext.define('TP.Panlet', {
             TP.log('['+this.id+'] rendered');
             this.startTimeouts();
             this.syncShadowTimeout();
-        },
-        afterlayout: function(This) {
-            /* make all border and background work */
-            if(this.xdata.showborder != true) {
-                // results in endless loop otherwise
-                this.applyBorderAndBackground();
-            }
+            this.applyBorderAndBackground();
         },
         beforestatesave: function( This, state, eOpts ) {
             if(This.locked) {
@@ -315,6 +311,10 @@ Ext.define('TP.Panlet', {
                     this.getEl().shadow.el.removeCls('hidden');
                 }
             }
+            if(this.autohideHeaderOffset != undefined && !this.gearitem) {
+                this.getEl().setStyle('overflow', 'visible');
+                this.getHeader().getEl().dom.style.top = this.autohideHeaderOffset+'px';
+            }
         }
     },
     hideHeader: function(global) {
@@ -333,7 +333,7 @@ Ext.define('TP.Panlet', {
     },
     applyBorderAndBackground: function() {
         this.overCls = 'autohideheaderover';
-        if((this.xdata.showborder == false) && this.gearitem == undefined) {
+        if(this.xdata.showborder == false && this.gearitem == undefined) {
             this.cls     = 'autohideheader';
             this.bodyCls = 'autohideheader';
             this.shadow  = false;
@@ -371,11 +371,10 @@ Ext.define('TP.Panlet', {
                 }
             }
         }
+        if(!this.header) { return; }
         var global = Ext.getCmp(this.panel_id);
         if(global.xdata.autohideheader || this.xdata.showborder == false) {
-            if(this.header) {
-                this.header.hide();
-            }
+            this.header.hide();
         }
         if(this.xdata.showborder == true && global.xdata.autohideheader == false) {
             this.header.show();
@@ -531,6 +530,7 @@ TP.panletGearHandler = function(panel) {
     if(panel.locked) { return; }
     var tab = Ext.getCmp(panel.panel_id);
     if(panel.gearitem == undefined) {
+        // show settings
         panel.add(Ext.create('TP.PanletGearItem', {}));
         panel.gearitem = panel.items.getAt(panel.items.length-1);
         if(!panel.gearItemsExtra) {
@@ -546,7 +546,10 @@ TP.panletGearHandler = function(panel) {
         /* set initial form values */
         panel.setFormDefaults();
         panel.stateful = false;
-        panel.items.getAt(0).hide();
+        // hide main content if already rendered
+        if(panel.items.getAt(0) != panel.gearitem) {
+            panel.items.getAt(0).hide();
+        }
 
         // add current available backends
         var backendItem = TP.getFormField(panel.gearitem.down('form'), 'backends');
@@ -563,15 +566,18 @@ TP.panletGearHandler = function(panel) {
             panel.gearInitCallback(panel);
         }
         panel.origSize = panel.getSize();
-        if(panel.origSize.width < 450 || panel.origSize.height < 250) {
-            panel.setSize(Ext.Array.max([450, panel.origSize.width]),
-                         Ext.Array.max([250, panel.origSize.height])
+        if(panel.origSize.width < panel.minSettingsWidth || panel.origSize.height < panel.minSettingsHeight) {
+            panel.setSize(Ext.Array.max([panel.minSettingsWidth, panel.origSize.width]),
+                         Ext.Array.max([panel.minSettingsHeight, panel.origSize.height])
                         );
         }
         panel.applyBorderAndBackground();
         panel.addCls('gearopen');
         panel.showHeader(tab);
+        // move to front
+        panel.el.dom.style.zIndex = 1000;
     } else {
+        // hide settings
         panel.remove(panel.gearitem);
         panel.gearitem.destroy();
         delete panel.gearItemsExtra;
@@ -584,8 +590,12 @@ TP.panletGearHandler = function(panel) {
         }
         panel.stateful = true;
         panel.applyBorderAndBackground();
-        panel.items.getAt(0).show();
+        if(panel.items.getAt(0)) {
+            panel.items.getAt(0).show();
+        }
         panel.hideHeader(tab);
         panel.syncShadowTimeout();
+        // move back
+        panel.el.dom.style.zIndex = panel.style.zIndex || 50;
     }
 }

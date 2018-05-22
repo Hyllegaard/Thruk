@@ -8,6 +8,7 @@ use File::Slurp qw/read_file/;
 use Data::Dumper qw/Dumper/;
 use POSIX ();
 use Thruk::Utils::Filter ();
+use Thruk::Utils::Broadcast ();
 
 =head1 NAME
 
@@ -27,10 +28,10 @@ BEGIN {
 
 ######################################
 
-our $VERSION = '2.12';
+our $VERSION = '2.20';
 
 my $project_root = home('Thruk::Config');
-my $branch       = '';
+my $branch       = '2';
 my $gitbranch    = get_git_name($project_root);
 my $filebranch   = $branch || 1;
 if($branch) {
@@ -45,7 +46,7 @@ $ENV{'THRUK_SRC'} = 'UNKNOWN' unless defined $ENV{'THRUK_SRC'};
 our %config = ('name'                   => 'Thruk',
               'version'                => $VERSION,
               'branch'                 => $branch,
-              'released'               => 'November 18, 2016',
+              'released'               => 'March 14, 2018',
               'compression_format'     => 'gzip',
               'ENCODING'               => 'utf-8',
               'image_path'             => $project_root.'/root/thruk/images',
@@ -84,6 +85,7 @@ our %config = ('name'                   => 'Thruk',
                                           'throw'               => \&Thruk::Utils::Filter::throw,
                                           'contains'            => \&Thruk::Utils::Filter::contains,
                                           'date_format'         => \&Thruk::Utils::Filter::date_format,
+                                          'last_check'          => \&Thruk::Utils::Filter::last_check,
                                           'remove_html_comments' => \&Thruk::Utils::Filter::remove_html_comments,
                                           'format_date'         => \&Thruk::Utils::format_date,
                                           'format_cronentry'    => \&Thruk::Utils::format_cronentry,
@@ -95,6 +97,7 @@ our %config = ('name'                   => 'Thruk',
                                           'encode_json_obj'     => \&Thruk::Utils::Filter::encode_json_obj,
                                           'get_user_token'      => \&Thruk::Utils::Filter::get_user_token,
                                           'uniqnumber'          => \&Thruk::Utils::Filter::uniqnumber,
+                                          'replace_macros'      => \&Thruk::Utils::Filter::replace_macros,
                                           'calculate_first_notification_delay_remaining' => \&Thruk::Utils::Filter::calculate_first_notification_delay_remaining,
                                           'has_business_process' => \&Thruk::Utils::Filter::has_business_process,
                                           'set_favicon_counter' => \&Thruk::Utils::Status::set_favicon_counter,
@@ -110,6 +113,7 @@ our %config = ('name'                   => 'Thruk',
                                           'validate_json'       => \&Thruk::Utils::Filter::validate_json,
                                           'get_action_menu'     => \&Thruk::Utils::Filter::get_action_menu,
                                           'get_cmd_submit_hash' => \&Thruk::Utils::Filter::get_cmd_submit_hash,
+                                          'get_broadcasts'      => \&Thruk::Utils::Broadcast::get_broadcasts,
 
                                           'version'        => $VERSION,
                                           'branch'         => $branch,
@@ -148,6 +152,7 @@ our %config = ('name'                   => 'Thruk',
                                           'show_top_pane'  => 0,        # used in _header.tt on status pages
                                           'body_class'     => '',       # used in _conf_bare.tt on config pages
                                           'thruk_debug'    => 0,
+                                          'panorama_debug' => 0,
                                           'all_in_one_css' => 0,
                                           'hide_backends_chooser' => 0,
                                           'show_sitepanel' => 'off',
@@ -155,6 +160,8 @@ our %config = ('name'                   => 'Thruk',
                                           'backend_chooser'         => 'select',
                                           'enable_shinken_features' => 0,
                                           'disable_backspace'       => 0,
+                                          'server_timezone'       => '',
+                                          'default_user_timezone' => 'Server Setting',
                                           'play_sounds'    => 0,
                                           'fav_counter'    => 0,
                                           'menu_states'      => {},
@@ -172,6 +179,7 @@ our %config = ('name'                   => 'Thruk',
                                                 'update.x'      => undef,
                                                 '_'             => undef,
                                           },
+                                          'physical_logo_path' => [],
                                           'all_in_one_javascript' => [
                                               'jquery-1.12.4.min.js',
                                               'thruk-'.$VERSION.'-'.$filebranch.'.js',
@@ -189,7 +197,16 @@ our %config = ('name'                   => 'Thruk',
                                               'thruk_noframes.css',
                                               'Thruk.css',
                                           ],
-                                          'jquery_ui' => '1.10.3',
+                                          'all_in_one_css_frames2' => [
+                                               'thruk_global.css',
+                                               'Thruk2.css',
+                                          ],
+                                          'all_in_one_css_noframes2' => [
+                                              'thruk_global.css',
+                                              'thruk_noframes.css',
+                                              'Thruk2.css',
+                                          ],
+                                          'jquery_ui' => '1.12.1',
                                           'all_in_one_javascript_panorama' => [
                                               'javascript/thruk-'.$VERSION.'-'.$filebranch.'.js',
                                               'plugins/panorama/ux/form/MultiSelect.js',
@@ -199,6 +216,10 @@ our %config = ('name'                   => 'Thruk',
                                               'plugins/panorama/bigscreen.js',
                                               'javascript/strftime-min.js',
                                               'plugins/panorama/OpenLayers-2.13.1.js',
+                                              'plugins/panorama/geoext2-2.0.2/src/GeoExt/Version.js',
+                                              'plugins/panorama/geoext2-2.0.2/src/GeoExt/data/LayerModel.js',
+                                              'plugins/panorama/geoext2-2.0.2/src/GeoExt/data/LayerStore.js',
+                                              'plugins/panorama/geoext2-2.0.2/src/GeoExt/panel/Map.js',
                                           ],
                                       },
                   PRE_CHOMP          => 0,
@@ -208,6 +229,7 @@ our %config = ('name'                   => 'Thruk',
                   STAT_TTL           => 604800, # templates do not change in production
                   STRICT             => 0,
                   render_die         => 1,
+                  EVAL_PERL          => 1,
               },
               nagios => {
                   service_state_by_number => {
@@ -302,6 +324,17 @@ sub get_config {
                     for my $peer (@{list($configs{$file}->{$key})}) {
                         $config{$key}->{'peer'} = [ @{list($config{$key}->{'peer'})}, @{list($peer->{'peer'})} ];
                     }
+                }
+                elsif($key =~ '^Thruk::Plugin::') {
+                    if(ref $configs{$file}->{$key} eq 'ARRAY') {
+                        my $hash = {};
+                        while(my $add = shift @{$configs{$file}->{$key}}) {
+                            $hash = { %{$hash}, %{$add} };
+                        }
+                        $configs{$file}->{$key} = $hash;
+                    }
+                    if(ref $configs{$file}->{$key} ne 'HASH') { confess("tried to merge into hash: ".Dumper($file, $key, $configs{$file}->{$key})); }
+                    $config{$key} = { %{$config{$key}}, %{$configs{$file}->{$key}} };
                 } else {
                     if(ref $configs{$file}->{$key} ne 'HASH') { confess("tried to merge into hash: ".Dumper($file, $key, $configs{$file}->{$key})); }
                     $config{$key} = { %{$config{$key}}, %{$configs{$file}->{$key}} };
@@ -372,6 +405,7 @@ sub set_default_config {
         'cgi.cfg'                       => 'cgi.cfg',
         bug_email_rcpt                  => 'bugs@thruk.org',
         home_link                       => 'http://www.thruk.org',
+        plugin_registry_url             => ['https://api.thruk.org/v1/plugin/list'],
         mode_file                       => '0660',
         mode_dir                        => '0770',
         backend_debug                   => 0,
@@ -397,7 +431,7 @@ sub set_default_config {
         group_paging_overview           => '*3, 10, 100, all',
         group_paging_grid               => '*5, 10, 50, all',
         group_paging_summary            => '*10, 50, 100, all',
-        default_theme                   => 'Thruk',
+        default_theme                   => 'Thruk2',
         datetime_format                 => '%Y-%m-%d  %H:%M:%S',
         datetime_format_long            => '%a %b %e %H:%M:%S %Z %Y',
         datetime_format_today           => '%H:%M:%S',
@@ -416,6 +450,7 @@ sub set_default_config {
         show_config_edit_buttons        => 0,
         show_backends_in_table          => 0,
         show_logout_button              => 0,
+        commandline_obfuscate_pattern   => [],
         backends_with_obj_config        => {},
         use_feature_statusmap           => 0,
         use_feature_statuswrl           => 0,
@@ -498,6 +533,7 @@ sub set_default_config {
         'cookie_auth_restricted_url'        => 'http://localhost/thruk/cgi-bin/restricted.cgi',
         'cookie_auth_session_timeout'       => 86400,
         'cookie_auth_session_cache_timeout' => 5,
+        'cookie_auth_domain'                => '',
         'perf_bar_mode'                     => 'match',
         'sitepanel'                         => 'auto',
         'ssl_verify_hostnames'              => 1,
@@ -527,6 +563,7 @@ sub set_default_config {
     for my $key (keys %{$defaults}) {
         $config->{$key} = exists $config->{$key} ? $config->{$key} : $defaults->{$key};
 
+        # convert lists to scalars if the default is a scalar value
         if(ref $defaults->{$key} eq "" && ref $config->{$key} eq "ARRAY") {
             my $l = scalar (@{$config->{$key}});
             $config->{$key} = $config->{$key}->[$l-1];
@@ -540,6 +577,7 @@ sub set_default_config {
 
     # merge hashes
     for my $key (qw/cmd_quick_status cmd_defaults/) {
+        die(sprintf("%s should be a hash, got %s: %s", $key, ref $config->{$key}, Dumper($config->{$key}))) unless ref $config->{$key} eq 'HASH';
         $config->{$key} = { %{$defaults->{$key}}, %{ $config->{$key}} };
     }
     # command disabled should be a hash
@@ -590,7 +628,9 @@ sub set_default_config {
     $config->{'show_custom_vars'} = [split(/\s*,\s*/mx, join(",", @{list($config->{'show_custom_vars'})}))];
 
     # make graph_replace a list
-    $config->{'graph_replace'} = [@{list($config->{'graph_replace'})}];
+    for my $key (qw/graph_replace commandline_obfuscate_pattern/) {
+        $config->{$key} = [@{list($config->{$key})}];
+    }
 
     ## no critic
     $ENV{'PERL_LWP_SSL_VERIFY_HOSTNAME'} = $config->{'ssl_verify_hostnames'};
@@ -610,6 +650,25 @@ sub _load_any {
     );
 
     return $cfg;
+}
+
+##############################################
+
+=head2 get_thruk_version
+
+  get_thruk_version($c, [$config])
+
+return thruk version string
+
+=cut
+
+sub get_thruk_version {
+    my($c, $config) = @_;
+    $config = $c->config unless $config;
+    if($config->{'branch'}) {
+        return($config->{'version'}.'-'.$config->{'branch'});
+    }
+    return($config->{'version'});
 }
 
 ##############################################
@@ -891,20 +950,22 @@ sub _do_finalize_config {
 
         # static content included?
         # only needed for development server, handled by apache aliasmatch otherwise
-        if( -d $addon.'root' and -w $config->{home}.'/root/thruk/plugins/' ) {
-            print STDERR " -> root\n" if $ENV{'THRUK_PLUGIN_DEBUG'};
-            my $target_symlink = $config->{home}.'/root/thruk/plugins/'.$addon_name;
-            if(-e $target_symlink) {
-                my @s1 = stat($target_symlink."/.");
-                my @s2 = stat($addon.'root/.');
-                if($s1[1] != $s2[1]) {
-                    print STDERR " -> inodes mismatch, trying to delete\n" if $ENV{'THRUK_PLUGIN_DEBUG'};
-                    unlink($target_symlink) or die("failed to unlink: ".$target_symlink." : ".$!);
+        if($ENV{'THRUK_SRC'} && ($ENV{'THRUK_SRC'} eq 'DebugServer' || $ENV{'THRUK_SRC'} eq 'TEST')) {
+            if( -d $addon.'root' and -w $config->{home}.'/root/thruk/plugins/.' ) {
+                print STDERR " -> root\n" if $ENV{'THRUK_PLUGIN_DEBUG'};
+                my $target_symlink = $config->{home}.'/root/thruk/plugins/'.$addon_name;
+                if(-e $target_symlink) {
+                    my @s1 = stat($target_symlink."/.");
+                    my @s2 = stat($addon.'root/.');
+                    if($s1[1] != $s2[1]) {
+                        print STDERR " -> inodes mismatch, trying to delete\n" if $ENV{'THRUK_PLUGIN_DEBUG'};
+                        unlink($target_symlink) or die("failed to unlink: ".$target_symlink." : ".$!);
+                    }
                 }
-            }
-            if(!-e $target_symlink) {
-                unlink($target_symlink);
-                symlink($addon.'root', $target_symlink) or die("cannot create ".$target_symlink." : ".$!);
+                if(!-e $target_symlink) {
+                    unlink($target_symlink);
+                    symlink($addon.'root', $target_symlink) or die("cannot create ".$target_symlink." : ".$!);
+                }
             }
         }
     }
@@ -935,8 +996,8 @@ sub _do_finalize_config {
     $config->{'ssi_path'} = $config->{'ssi_path'} || $config->{etc_path}.'/ssi';
 
     ###################################################
-    # when using shadow naemon, some settings don't make sense
-    if($config->{'use_shadow_naemon'} || $config->{'use_lmd_core'}) {
+    # when using lmd, some settings don't make sense
+    if($config->{'use_lmd_core'}) {
         $config->{'connection_pool_size'} = 1; # no pool required when using caching
         $config->{'check_local_states'}   = 0; # local state checking not required
     }
@@ -984,6 +1045,20 @@ sub _do_finalize_config {
                 my $basename = $1;
                 $config->{'action_menu_items'}->{$basename} = 'file://'.$file;
             }
+        }
+    }
+
+    # enable OMD tweaks
+    if($ENV{'OMD_ROOT'}) {
+        my $site = $ENV{'OMD_SITE'};
+        my $root = $ENV{'OMD_ROOT'};
+        my($siteport) = (`grep CONFIG_APACHE_TCP_PORT $root/etc/omd/site.conf` =~ m/(\d+)/mx);
+        my($ssl)      = (`grep CONFIG_APACHE_MODE     $root/etc/omd/site.conf` =~ m/'(\w+)'/mx);
+        my $proto     = $ssl eq 'ssl' ? 'https' : 'http';
+        $config->{'omd_local_site_url'} = sprintf("%s://%s:%d/%s", $proto, "127.0.0.1", $siteport, $site);
+        # bypass system reverse proxy for restricted cgi for permormance and locking reasons
+        if($config->{'cookie_auth_restricted_url'} && $config->{'cookie_auth_restricted_url'} =~ m|^https?://localhost/$site/thruk/cgi-bin/restricted.cgi$|mx) {
+            $config->{'cookie_auth_restricted_url'} = $config->{'omd_local_site_url'}.'/thruk/cgi-bin/restricted.cgi';
         }
     }
 
@@ -1128,7 +1203,12 @@ sub _parse_rows {
                 } elsif(ref $conf->{$k} eq 'ARRAY') {
                     push @{$conf->{$k}}, $next;
                 } else {
-                    $conf->{$k} = [$conf->{$k}, $next];
+                    # merge top level hashes
+                    if(!$until && ref($conf->{$k}) eq 'HASH' && ref($next) eq 'HASH') {
+                        $conf->{$k} = { %{$conf->{$k}}, %{$next} };
+                    } else {
+                        $conf->{$k} = [$conf->{$k}, $next];
+                    }
                 }
                 next;
             }

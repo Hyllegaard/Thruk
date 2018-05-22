@@ -65,7 +65,7 @@ thruk_local.d/ instead.
 
 === thruk_local.d
 {% include new_since.ad version="2.00" %}
-Local settings drop directory. All `*.cfg` and `*.conf` files in here override settings from the
+Local settings drop directory. All `\*.cfg` and `\*.conf` files in here override settings from the
 thruk.conf file. Besides the standard file extension `cfg` and `conf` it is
 also possible to use the hostname. Those files are only used if the hostname
 matches the actual system hostname. This is a good way to separate test and
@@ -164,14 +164,32 @@ ex.:
 
 === use_timezone
 
+*deprecated* use `server_timezone` now.
+
+=== server_timezone
+{% include new_since.ad version="2.22" %}
 Changes the timezone from the systems default to this timezone.
 Only set this if you have trouble with displaying the right timestamps.
-Use /usr/share/zoneinfo on most linux systems for reference, as some
+Use `/usr/share/zoneinfo` on most linux systems for reference, as some
 timezones are set using the Region/Country format.
 
 ex.:
 
-  use_timezone = CET
+  server_timezone = CET
+
+
+=== default_user_timezone
+{% include new_since.ad version="2.22" %}
+Since users can change their timezone setting, this changes their default.
+Possible values are:
+
+  - "Server Setting"
+  - "Local Browser"
+  - all from `/usr/share/zoneinfo`
+
+ex.:
+
+  default_user_timezone = "Server Setting"
 
 
 === mobile_agent
@@ -229,6 +247,10 @@ ex.:
 === report_include_class2
 Include messages with class = 2 (program messages) in reports.
 Setting this to 0 allows the MySQL backend to use indexes efficiently
+
+    - 0 = off
+    - 1 = auto (default)
+    - 2 = on
 
 ex.:
 
@@ -459,6 +481,18 @@ Example redirect rule for apache:
 ex.:
 
   plugin_path = ./plugins
+
+
+
+=== plugin_registry_url
+
+Url to Thruks plugin registry. The url must supply a json data structure with a
+list thruk plugins. Can be specified multiple times.
+
+ex.:
+
+  plugin_registry_url = https://api.thruk.org/v1/plugin/list
+
 
 
 === themes_path
@@ -718,6 +752,13 @@ ex.:
   group_paging_grid = *5,  10, 50,  all
 
 
+=== problems_limit
+Cut off objects on problems page, set 0 to disable limit completly.
+Defaults to 500.
+
+ex.:
+
+  problems_limit = 500
 
 
 
@@ -921,6 +962,18 @@ In order to replace the user macros for commands, you have to set the
 ex.:
 
   show_full_commandline = 0
+
+
+=== commandline_obfuscate_pattern
+{% include new_since.ad version="2.18" %}
+Replace pattern for expanded command lines. Could be used to replace
+sensitive information from beeing displayed in the gui.
+The pattern is a simple perl regular substitute expression in the form of
+'/pattern/replacement/'
+
+ex.:
+
+  commandline_obfuscate_pattern = /(\-\-password=")[^"]*(")/$1"***"$2/
 
 
 
@@ -1262,20 +1315,15 @@ ex.:
 
 === logcache
 Enables caching logfiles for faster access and less memory usage for
-the naemon process. Cache supports MongoDB and Mysql only. Prefered
-type is Mysql. Format is a Mysql/MongoDB connection string like
+the naemon process. Cache supports only Mysql. Prefered
+type is Mysql. Format is a Mysql connection string like
 'mysql://hostname:port/db'. Using a cache dramatically decreases cpu and
 memory usage of Thruk and Naemon when accessing logfiles, for example when
 creating reports.
 
-[WARNING]
-The MongoDB logcache is deprecated and will be removed from Thruk in 2016. Use the MySQL logcache instead.
-
 ex.:
 
   logcache = mysql://user:password@localhost:3306/thruk_log_cache
-
-  logcache = mongodb://localhost:27017/thruk_log_cache
 
 
 === logcache_import_exclude
@@ -1309,7 +1357,7 @@ and then manually import those files.
 
 There are some useful enviromenet variables set before the script is started:
 
-  - REMOTE_USER contains the current user.
+  - standard macros as listed in link:cli.html#_environment-variables[CLI Environment]
   - THRUK_BACKENDS is a comma separated list of the selected backends.
   - THRUK_LOGCACHE is the connection string to the thruk logcache database.
 
@@ -1318,7 +1366,21 @@ ex.:
   logcache_import_command = .../importscript.sh
 
 
+=== logcache_pxc_strict_mode
+If you are using a mysql database with galera replication such as MariaDB Cluster,
+Percona XtraDB Cluster or Galera Cluster it is a good idea to avoid locks and
+optimize/repair table statements since they are not properly replicated.
 
+Especially in Percona XtraDB Cluster > 5.6 the default setting of pxc_strict_mode
+will disable locks all togheter.
+
+This setting will make the logcache work in that case. More information about
+pxc_strict_mode available here:
+  - link:https://www.percona.com/doc/percona-xtradb-cluster/LATEST/features/pxc-strict-mode.html[Percona documentation]
+
+ex.:
+
+  logcache_pxc_strict_mode = 1
 
 === delay_pages_after_backend_reload
 
@@ -1418,7 +1480,16 @@ sessions.
 
 ex.:
 
-  cookie_auth_session_cache_timeout = 5
+  cookie_auth_session_cache_timeout = 30
+
+
+=== cookie_auth_login_timeout
+Timeout for internal sub request on authentication url. Defaults to 10 seconds
+and can be disabled by setting it to zero.
+
+ex.:
+
+  cookie_auth_login_timeout = 10
 
 
 === cookie_auth_domain
@@ -1436,7 +1507,10 @@ ex.:
 
 Hook script which is called on every successful login. The REMOTE_USER
 environment variable will be set to the username of the current logged
-in user. Useful to do magic stuff on each login.
+in user. Useful to do magic stuff on each login. The REMOTE_USER_GROUPS
+environment variable contains semicolon separated list of contactgroups.
+Available standard environment variables are listed on the
+link:cli.html#_environment-variables[CLI Environment] page.
 
 ex.:
 
@@ -1449,13 +1523,13 @@ This is a regular expression to set user agents which are allowed to request
 pages with normal basic auth.
 Use it to allow scripts easy access with bypassing the cookie auth and directly
 accessing pages.
-See an example in the link:cli.html#curl_wget[cli section].
+See an example in the link:cli.html#_curl-wget[cli section].
 
 Default: (curl|wget)
 
 ex.:
 
-  cookie_auth_direct_agents = (curl|wget)
+  cookie_auth_direct_agents = (wget|curl|python|Go-http-client)
 
 
 
@@ -1519,6 +1593,15 @@ Default duration of new downtimes in seconds. Default is 2 hours.
 ex.:
 
   downtime_duration = 7200
+
+
+=== downtime_max_duration
+Maximum duration of new downtimes. Use quantifiers like d=days, w=weeks,
+y=years to set human readable values. Default is unlimited.
+
+ex.:
+
+  downtime_max_duration = 4w
 
 
 === expire_ack_duration
@@ -1586,14 +1669,6 @@ ex.:
   use_feature_recurring_downtime = 1
 
 
-=== use_feature_histogram
-Use histograms, shows histogram links.
-
-ex.:
-
-  use_feature_histogram = 1
-
-
 === use_service_description
 Use service's description instead of display name.
 
@@ -1628,6 +1703,18 @@ will wait this amount and display the result immediately.
 ex.:
 
   wait_timeout = 10
+
+
+=== require_comments_for_disable_cmds
+If set to 1, the user has to enter a comment for all disable active checks /
+disable notifications / disable event handler commands. These comments are
+automatically prefixed with the command name and will be deleted when checks /
+notifications / handlers are enabled again. They are also used by the
+'reenable_actions' utility.
+
+ex.:
+
+  require_comments_for_disable_cmds = 1
 
 
 
@@ -1704,22 +1791,22 @@ Sample menu with two items and a seperator:
 .....
 {% raw %}
   {
-    "icon":"/thruk/themes/{{theme}}/images/dropdown.png",
+    "icon":"../themes/{{theme}}/images/dropdown.png",
     "title": "sample menu",
     "menu": [
       {
-        "icon":   "/thruk/themes/{{theme}}/images/arrow_refresh.png",
+        "icon":   "../themes/{{theme}}/images/arrow_refresh.png",
         "label":  "refresh",
         "action": "server://refresh/$HOSTNAME$"
       },
       {
-        "icon":   "/thruk/themes/{{theme}}/images/page_white_key.png",
+        "icon":   "../themes/{{theme}}/images/page_white_key.png",
         "label":  "example",
         "action": "server://example/$HOSTNAME$/$SERVICEDESC$"
       },
       "-",
       {
-        "icon":   "/thruk/themes/{{theme}}/images/page_white_text.png",
+        "icon":   "../themes/{{theme}}/images/page_white_text.png",
         "label":  "wiki",
         "action": "http://company-wiki/pages/$HOSTNAME$"
       }
@@ -1749,6 +1836,8 @@ The menu item can have the following attributes:
                         You may use `{% raw %}{{macros}}{% endraw %}` here too. Also javascript: links are valid,
                         for example `javascript:alert('$HOSTNAME$')`.
      ** `target`        Use '_blank' here to open link in a new window.
+     ** `onclick`       confirmation dialog or any other callback, ex: "return(confirm('Really restart service?'));"
+     ** `close_timeout` timeout till the result popup will close, defaults to 5 seconds if ok or 30 seconds if failed. Set to zero to never close the result popup.
      ** `...`           arbitrary attributes will be used as attributes of the menu item link html element.
 
 
@@ -1768,12 +1857,12 @@ Sample icons with two action icons:
 {% raw %}
   [
     {
-      "icon":"/thruk/themes/{{theme}}/images/criticity_1.png",
+      "icon":"../themes/{{theme}}/images/criticity_1.png",
       "action":"http://splunk/abc/hostid=$_HOSTHOSTID$",
       "target":"_blank"
     },
     {
-      "icon":"/thruk/themes/{{theme}}/images/arrow_refresh.png",
+      "icon":"../themes/{{theme}}/images/arrow_refresh.png",
       "action":"server://refresh/$HOSTNAME$",
     }
   ]
@@ -2039,6 +2128,13 @@ for details.
      ** `options`
         *** `peer`            address of this connection.
         *** `resource_file`   resource_file for this peer (used for macro replacement)
+        *** `auth`            secret key for http connections.
+        *** `remote_name`     remote site name for http connections (required if remote instance is connected to multiple backends)
+        *** `fallback_peer`   fallback connection address
+        *** `cert`            optional client certificate for tls connections
+        *** `key`             optional client key for tls connections
+        *** `ca_file`         ca file to verify tls server
+        *** `verify`          set to 0 to disable any tls verification
      ** `configtool`
         *** `core_type`       Give the config parser a hint about
                               your config. Can be 'naemon', 'nagios', 'icinga'
@@ -2081,9 +2177,9 @@ ex.:
             peer       = /tmp/livestatus.socket
         </options>
         <configtool>
-            core_conf  = /etc/naemon/naemon.cfg
-            obj_check  = /etc/init.d/naemon checkconfig
-            obj_reload = /etc/init.d/naemon reload
+            core_conf      = /etc/naemon/naemon.cfg
+            obj_check_cmd  = /etc/init.d/naemon checkconfig
+            obj_reload_cmd = /etc/init.d/naemon reload
         </configtool>
     </peer>
     <peer>
@@ -2095,9 +2191,30 @@ ex.:
     </peer>
     <peer>
         name   = External Shinken
-        type = livestatus
+        type   = livestatus
         <options>
-            peer   = 172.16.0.3:50000
+            peer          = 172.16.0.3:50000
+            fallback_peer = 172.16.0.4:50000  # will be used as fallback
+       </options>
+    </peer>
+    <peer>
+        name   = Another Thruk
+        type   = http
+        <options>
+            peer        = http://172.16.0.4/thruk/
+            auth        = secret_key_from_remote_instance
+            remote_name = id1   # required if remote site has multiple backends connected itself
+       </options>
+    </peer>
+    <peer>
+        name   = TLS Livestatus
+        type   = livestatus
+        <options>
+            peer    = tls://172.16.0.2:9999
+            cert    = client.pem
+            key     = client.key
+            ca_file = server.crt
+            verify  = 1
        </options>
     </peer>
   </Component>
@@ -2125,7 +2242,8 @@ ex.:
     pre_obj_save_cmd          = .../hook.sh
     post_obj_save_cmd         = .../hook.sh
     git_base_dir              = /etc/naemon/conf.d/custom/
-    edit_files                = some/extra/files/to.edit
+    show_summary_prompt       = 1
+    #edit_files               = some/extra/files/to.edit # deprecated
     extra_custom_var_host     = _WORKER
     extra_custom_var_service  = _SNMP_COMMUNITY, _OTHER_CUSTOM_VARIABLE
   </Component>
@@ -2152,20 +2270,26 @@ if the command returns non-zero exit code. Command will be run with
 
 The following environment variables will be set:
 
-     ** `REMOTE_USER`          username of the logged in user
-     ** `THRUK_BACKEND_ID`     internal id of the current edited backend
-     ** `THRUK_BACKEND_NAME`   name of the current edited backend
+     ** `standard macros`           as listed in link:cli.html#_environment-variables[CLI Environment]
+     ** `THRUK_BACKEND_ID`          internal id of the current edited backend
+     ** `THRUK_BACKEND_NAME`        name of the current edited backend
+     ** `THRUK_SUMMARY_MESSAGE`     user supplied change summary title
+     ** `THRUK_SUMMARY_DETAILS`     user supplied change details
 
 === post_obj_save_cmd
 Run a command after saving object config files. Command will be run with
 'post' as first argument and the root config folder as second
 argument.
 
+An example can be found in 'examples/config_tool_git_checkin'.
+
 The following environment variables will be set:
 
-     ** `REMOTE_USER`          username of the logged in user
-     ** `THRUK_BACKEND_ID`     internal id of the current edited backend
-     ** `THRUK_BACKEND_NAME`   name of the current edited backend
+     ** `standard macros`           as listed in link:cli.html#_environment-variables[CLI Environment]
+     ** `THRUK_BACKEND_ID`          internal id of the current edited backend
+     ** `THRUK_BACKEND_NAME`        name of the current edited backend
+     ** `THRUK_SUMMARY_MESSAGE`     user supplied change summary title
+     ** `THRUK_SUMMARY_DETAILS`     user supplied change details
 
 
 === git_base_dir
@@ -2174,6 +2298,11 @@ directory which is used to display the history. Should point to a
 directory which is part of a git repository. This config setting is
 only used for the history support in the configuration tool. The
 'git_base_dir' may be overriden by an per backend value.
+
+=== show_summary_prompt
+Thruk will show a prompt to input a change summary if a 'post_obj_save_cmd' is
+set. You can use this option to suppress that prompt.
+
 
 === edit_files
 
@@ -2210,6 +2339,7 @@ ex.:
     geo_map_default_zoom   = 5
     extra_fonts            = CompanyFont1, CompanyFont2
     new_files_start_at     = 1
+    default_state_order    = down, unreachable, ...
   </Component>
 
 
@@ -2234,6 +2364,9 @@ leaks. Disabled when set to 0.
 Normally new files start at index 1 but this can be changed here. This helps in
 situations when more than one Thruk installation has to create dashboards in
 the same folder.
+
+=== default_state_order
+Defines the order to determine the worst state for filter and group icons.
 
 === geo_map_default_center
 Default coordinates (lon,lat) for new geo maps.
@@ -2271,7 +2404,8 @@ ex.:
     max_concurrent_reports = 2
     report_base_url        = http://host.local/thruk/cgi-bin/
     phantomjs              = /usr/bin/phantomjs
-    pnp_export             = plugins/plugins-enabled/reports2/script/pnp_export.sh
+    pnp_export             = script/pnp_export.sh
+    grafana_export         = script/grafana_export.sh
     report_from_email      = User Name <example@mail.com>
     default_template       = host_sla.tt
   </Component>
@@ -2317,6 +2451,11 @@ ex.:
 
   export PNP_WGET="wget -q --user=admin --password=secret"
   export PNP_URL_PREFIX="http://demo.thruk.org"
+
+
+=== grafana_export
+
+Override default script for exporting grafana graphs to png with `grafana_export`.
 
 
 === report_from_email
@@ -2386,9 +2525,11 @@ Configuration Example:
     objects_save_file      = /etc/naemon/conf.d/bp_generated.cfg
     objects_templates_file = /etc/naemon/conf.d/thruk_bp_templates.cfg
     objects_reload_cmd     = /etc/init.d/naemon reload
-    #pre_obj_save_cmd      =
-    #post_obj_save_cmd     =
+    #pre_save_cmd          =
+    #post_save_cmd         =
     refresh_interval       = 1
+    #favorite_custom_function = echo ; echo_function
+    #worker                = 5
   </Component>
 
 
@@ -2413,16 +2554,49 @@ User maintained file containing templates used for business process services.
 === objects_reload_cmd
 Command to apply changes to the objects_save_file.
 
-=== pre_obj_save_cmd
+=== pre_save_cmd
 Run this hook command before saving a business process.
+Along with the default environment variables set, there are two extra variables set which can be used:
 
-=== post_obj_save_cmd
+  - THRUK_BP_FILE:  contains the file name of the business process being saved
+  - THRUK_BP_STAGE: is set to 'pre'
+
+=== post_save_cmd
 Run this hook command after saving a business process.
+The same environment variables will be used as in the pre_save_cmd, except
+stage is set to 'post'.
 
 === refresh_interval
 Refresh interval defines how often business processes
 will be recalculated and refreshed. (in minutes)
 
+
+=== favorite_custom_function
+Favorite custom function will be displayed on the 'Type' tab
+so you don't have to select custom first. Syntax is <name>;<function>
+
+
+=== worker
+Set the number of parallel business process calculations. Setting it
+to 1 disables parallelization. Setting it to 0 trys to autodetect a
+suitable value.
+
+== Component Thruk::Plugin::Mobile
+
+The Mobile plugin adds a mobile view component.
+
+Configuration Example:
+
+  <Component Thruk::Plugin::Mobile>
+    links   = Dashboard ABC ; panorama.cgi?map=ABC
+    links   = My Problems   ; \#problems?contact=$CONTACTNAME$
+  </Component>
+
+
+=== links
+{% include new_since.ad version="2.18" %}
+Additonal links on the start page in the form `<name> ; <url>`.
+The url is relative to the mobile.cgi
 
 
 
@@ -2431,6 +2605,9 @@ Both, the 'Users' and the 'Groups' directive override default settings for
 single users or groups. In theory it's possible to override each and every
 config setting from the thruk.conf but you will get funny results if you
 override fundamental settings like backends, paths and such things.
+
+'Groups' are contact groups from your monitoring core and 'Users' are the
+contact names as they show up in the Thruk interface.
 
 === Groups
 The groups directive overrides specific config settings for one group only.

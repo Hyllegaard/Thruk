@@ -57,8 +57,8 @@ sub cmd {
        or $conf->{'nofork'}
        or exists $c->req->parameters->{'noexternalforks'}
     ) {
-        local $ENV{REMOTE_USER} = $c->stash->{'remote_user'};
-        my $out = `$cmd`;
+        # $rc, $out
+        my(undef, $out) = Thruk::Utils::IO::cmd($c, $cmd);
         return _finished_job_page($c, $c->stash, undef, $out);
     }
 
@@ -102,6 +102,7 @@ sub cmd {
             forward      => "forward on success"
             backends     => "list of selected backends (keys)"
             nofork       => "don't fork"
+            background   => "return $jobid if set, or redirect otherwise"
         }
     )
 
@@ -134,67 +135,64 @@ sub perl {
 
     if($pid) {
         return _do_parent_stuff($c, $dir, $pid, $id, $conf);
-    } else {
-        if(defined $conf->{'backends'}) {
-            $c->{'db'}->disable_backends();
-            $c->{'db'}->enable_backends($conf->{'backends'});
-        }
-        eval {
-            $c->stats->profile(begin => 'External::perl');
-            _do_child_stuff($c, $dir, $id);
-            local $SIG{CHLD} = 'DEFAULT';
+    }
 
-            do {
-                ## no critic
-                local *STDOUT;
-                local *STDERR;
-                open STDERR, '>', $dir."/stderr";
-                open STDOUT, '>', $dir."/stdout";
+    if(defined $conf->{'backends'}) {
+        $c->{'db'}->disable_backends();
+        $c->{'db'}->enable_backends($conf->{'backends'});
+    }
+    eval {
+        $c->stats->profile(begin => 'External::perl');
+        _do_child_stuff($c, $dir, $id);
+        local $SIG{CHLD} = 'DEFAULT';
 
-                # some db drivers need reconnect after forking
-                _reconnect($c);
+        do {
+            # some db drivers need reconnect after forking
+            _reconnect($c);
 
-                my $rc = eval($conf->{'expr'});
-                ## use critic
+            ## no critic
+            local *STDOUT;
+            local *STDERR;
+            open STDERR, '>', $dir."/stderr";
+            open STDOUT, '>', $dir."/stdout";
 
-                if($@) {
-                    print STDERR $@;
-                    exit(1);
-                }
+            my $rc = eval($conf->{'expr'});
+            ## use critic
 
-                $rc = -1 unless defined $rc;
-                open(my $fh, '>>', $dir."/rc");
-                print $fh $rc;
-                Thruk::Utils::IO::close($fh, $dir."/rc");
-
-                close(STDOUT);
-                close(STDERR);
-            };
-
-            # save stash
-            _clean_unstorable_refs($c->stash);
-            store(\%{$c->stash}, $dir."/stash");
-
-            if($c->config->{'thruk_debug'}) {
-                open(my $fh, '>', $dir."/stash.dump");
-                print $fh Dumper($c->stash);
-                CORE::close($fh);
+            if($@) {
+                print STDERR $@;
+                exit(1);
             }
 
-            $c->stats->profile(end => 'External::perl');
-            save_profile($c, $dir);
+            $rc = -1 unless defined $rc;
+            open(my $fh, '>>', $dir."/rc");
+            print $fh $rc;
+            Thruk::Utils::IO::close($fh, $dir."/rc");
+
+            close(STDOUT);
+            close(STDERR);
         };
-        if($@) {
-            my $err = $@;
-            eval {
-                open(my $fh, '>>', $dir."/stderr");
-                print $fh $err;
-                Thruk::Utils::IO::close($fh, $dir."/stderr");
-            };
-            save_profile($c, $dir);
-            exit(1);
+
+        # save stash
+        _clean_unstorable_refs($c->stash);
+        store(\%{$c->stash}, $dir."/stash");
+
+        if($c->config->{'thruk_debug'}) {
+            open(my $fh, '>', $dir."/stash.dump");
+            print $fh Dumper($c->stash);
+            CORE::close($fh);
         }
-        save_profile($c, $dir);
+    };
+    $c->stats->profile(end => 'External::perl');
+    save_profile($c, $dir);
+    if($@) {
+        my $err = $@;
+        eval {
+            open(my $fh, '>>', $dir."/stderr");
+            print $fh $err;
+            Thruk::Utils::IO::close($fh, $dir."/stderr");
+        };
+        # calling _exit skips running END blocks
         exit(0);
     }
     exit(1);
@@ -456,11 +454,14 @@ sub job_page {
         return;
     }
 
-    # try to directly serve the request if it takes less than 10seconds
-    while($is_running and $time < 10) {
-        sleep(1);
+    # try to directly serve the request if it takes less than 3 seconds
+    $c->stats->profile(begin => "job_page waiting for finish");
+    while($is_running and $time < 3) {
+        Time::HiRes::sleep(0.1) if $time <  1;
+        Time::HiRes::sleep(0.3) if $time >= 1;
         ($is_running,$time,$percent,$message,$forward) = get_status($c, $job);
     }
+    $c->stats->profile(end => "job_page waiting for finish");
 
     # job still running?
     if($is_running) {
@@ -475,9 +476,14 @@ sub job_page {
         $c->stash->{template}             = 'waiting_for_job.tt';
     } else {
         # job finished, display result
-        #my($out,$err,$time,$dir,$stash)...
-        my($out,$err,undef,$dir,$stash) = get_result($c, $job);
+        #my($out,$err,$time,$dir,$stash,$rc,$profile)...
+        my($out,$err,undef,$dir,$stash,$rc,$profile) = get_result($c, $job);
         return $c->detach('/error/index/22') unless defined $dir;
+        if($profile) {
+            for my $p (split(/Profile:/mx, $profile)) {
+                push @{$c->stash->{'profile'}}, "Profile:".$p if $p;
+            }
+        }
         if(defined $stash and defined $stash->{'original_url'}) { $c->stash->{'original_url'} = $stash->{'original_url'} }
         if(defined $err and $err ne '') {
             $c->error($err);
@@ -552,7 +558,11 @@ sub _do_child_stuff {
     # make remote user available
     if($c) {
         confess('no remote_user') unless defined $c->stash->{'remote_user'};
-        $ENV{REMOTE_USER} = $c->stash->{'remote_user'};
+        $ENV{REMOTE_USER}        = $c->stash->{'remote_user'};
+        my $groups = [];
+        my $cache = $c->cache->get->{'users'}->{$c->stash->{'remote_user'}};
+        $groups = [sort keys %{$cache->{'contactgroups'}}] if($cache && $cache->{'contactgroups'});
+        $ENV{REMOTE_USER_GROUPS} = join(';', @{$groups}) if $c;
     }
 
     $|=1; # autoflush

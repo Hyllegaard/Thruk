@@ -111,6 +111,21 @@ sub get_processinfo {
 
 ##########################################################
 
+=head2 get_sites
+
+  get_sites
+
+returns a list of lmd sites
+
+=cut
+
+sub get_sites {
+    my $self = shift;
+    confess("unimplemented");
+}
+
+##########################################################
+
 =head2 get_can_submit_commands
 
 returns if this user is allowed to submit commands
@@ -522,6 +537,20 @@ renew logcache
 
 =cut
 sub renew_logcache {
+    my $self = shift;
+    confess("unimplemented");
+}
+
+##########################################################
+
+=head2 get_logs_start_end
+
+  get_logs_start_end
+
+returns first and last logfile entry
+
+=cut
+sub get_logs_start_end {
     my $self = shift;
     confess("unimplemented");
 }

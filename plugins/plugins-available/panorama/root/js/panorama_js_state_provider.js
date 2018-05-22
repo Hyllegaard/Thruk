@@ -72,6 +72,8 @@ Ext.state.HttpProvider = function(config){
     Ext.state.HttpProvider.superclass.constructor.call(this);
     this.url       = '';
     this.saveDelay = 500;
+    this.isSaving = false;
+    this.isSavingCounter = 0;
     Ext.apply(this, config);
     this.state = this.readValues();
 };
@@ -100,22 +102,9 @@ Ext.extend(Ext.state.HttpProvider, Ext.state.Provider, {
                 try {
                     state[key] = Ext.JSON.decode(ExtState[key]);
                 } catch(err) {
-                    // REMOVE AFTER: 01.01.2017
-                    // old style is just decoded
-                    if(state[key] == undefined) {
-                        state[key] = this.decodeValue(ExtState[key]);
-                        ExtState[key] = Ext.JSON.encode(state[key]);
-                        // save in new format
-                        this.queueChanges();
-                        TP.reload_required = true;
-                    }
+                    TP.Msg.msg("fail_message~~decode failed: "+err);
                 }
             }
-        }
-
-        // REMOVE AFTER: 01.01.2017
-        if(ExtStateSplit == false) {
-            this.lastdata = Ext.JSON.encode(ExtState);
         }
 
         this.queueChanges();
@@ -166,59 +155,67 @@ Ext.extend(Ext.state.HttpProvider, Ext.state.Provider, {
     },
 
     /* send changes back to server */
-    saveChanges: function(async, extraParams) {
+    saveChanges: function(extraParams, callback) {
+        var cp = this;
         if(readonly || dashboard_ignore_changes) { return; }
-        if(!TP.initialized) { this.queueChanges(); return; }
-        if(async == undefined) { async = true; }
-
-        // REMOVE AFTER: 01.01.2017
-        if(ExtStateSplit == false) {
-            var sum = Ext.JSON.encode(ExtState);
-            if(sum == this.lastdata) {
-                return;
-            }
-            this.lastdata = sum;
-            var params = { task:  'update' };
-            for (var key in ExtState) {
-                // save data json encoded
-                params[key] = ExtState[key];
-            }
-            var conn = new Ext.data.Connection();
-            conn.request({ url: this.url, params: params, async: async });
-            return;
-        }
+        if(!TP.initialized) { cp.queueChanges(); return; }
 
         /* seperate state by dashboards */
         var data = setStateByTab(ExtState);
-        if(!this.lastdata) {
+        if(!cp.lastdata) {
             /* set initial data which we can later check against to reduce number of update querys */
-            this.lastdata = data;
+            cp.lastdata = data;
             return;
         }
         var params  = {};
         var changed = 0;
         for(var key in data) {
-            var encoded1 = Ext.JSON.encode(this.lastdata[key]);
+            var encoded1 = Ext.JSON.encode(cp.lastdata[key]);
             var encoded2 = Ext.JSON.encode(data[key]);
-            if(!TP.JSONequals(encoded1, encoded2)) {
+            if(cp.lastdata[key] != null && !TP.JSONequals(encoded1, encoded2)) {
                 params[key] = encoded2;
                 changed++;
             }
         }
+        cp.lastdata = data;
         if(changed == 0) { return; }
-        this.lastdata = data;
         params.task   = 'update2';
         if(extraParams) {
             Ext.apply(params, extraParams);
         }
-        params.current_tab = Ext.getCmp('tabpan').getActiveTab().id;
-        var conn      = new Ext.data.Connection();
-        TP.log('[global] state provider saved to server');
+        if(Ext.getCmp('tabpan').getActiveTab()) {
+            params.current_tab = Ext.getCmp('tabpan').getActiveTab().id;
+        }
+
+        if(!TP.stateSaveImage) {
+            TP.stateSaveImage = Ext.create('Ext.Img', {
+                src:      url_prefix+'plugins/panorama/images/disk.png',
+                autoEl:  'div',
+                floating: true,
+                shadow:   false,
+                title:   'saving...',
+                renderTo: Ext.getBody()
+            });
+        }
+        TP.stateSaveImage.showAt(Ext.getBody().getSize().width - 30, 35);
+        TP.timeouts['timeout_stateprovider_saveimagedetroy'] = window.setTimeout(function() {
+            TP.stateSaveImage.hide();
+        }, 1500);
+
+        cp.isSavingCounter++;
+        cp.isSaving = true;
+        var conn    = new Ext.data.Connection();
         conn.request({
-            url:    this.url,
+            url:    cp.url,
             params: params,
-            async:  async,
             success: function(response, opts) {
+                cp.isSavingCounter--;
+                cp.isSaving = (cp.isSavingCounter == 0);
+                TP.log('[global] state provider saved to server');
+                TP.timeouts['timeout_stateprovider_saveimagedetroy'] = window.setTimeout(function() {
+                    TP.stateSaveImage.hide();
+                }, 500);
+
                 /* allow response to contain cookie messages */
                 TP.getResponse(undefined, response, false, true);
 
@@ -226,6 +223,14 @@ Ext.extend(Ext.state.HttpProvider, Ext.state.Provider, {
                 if(TP.dashboardsSettingGrid && TP.dashboardsSettingGrid.loader) {
                     TP.dashboardsSettingGrid.loader.load();
                 }
+                if(callback) { callback(refresh, opts); }
+            },
+            failure: function(response, opts) {
+                cp.isSavingCounter--;
+                cp.isSaving = (cp.isSavingCounter == 0);
+                TP.log('[global] state provider failed to save changes to server');
+                TP.Msg.msg("fail_message~~saving changes failed: "+response.status+' - '+response.statusText+'<br>please have a look at the server logfile.');
+                if(callback) { callback(refresh, opts); }
             }
         });
     }

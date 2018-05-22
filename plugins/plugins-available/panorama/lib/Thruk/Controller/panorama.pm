@@ -3,7 +3,7 @@ package Thruk::Controller::panorama;
 use strict;
 use warnings;
 use Data::Dumper qw/Dumper/;
-use JSON::XS qw/decode_json encode_json/;
+use Cpanel::JSON::XS qw/decode_json encode_json/;
 use File::Slurp qw/read_file/;
 use File::Copy qw/move copy/;
 use Encode qw(decode_utf8 encode_utf8);
@@ -49,14 +49,21 @@ sub index {
         $c->config->{'panorama_modules_loaded'} = 1;
     }
 
+    # add current dashboard to error details, so if something goes wrong, we can log which dashboard is responsible
+    $c->stash->{errorDetails} = '' unless $c->stash->{errorDetails};
+    $c->stash->{errorDetails} .= sprintf("Dashboard: %s\n", $c->req->parameters->{'current_tab'}) if $c->req->parameters->{'current_tab'};
+
     # add some functions
     $c->stash->{'get_static_panorama_files'} = \&Thruk::Utils::Panorama::get_static_panorama_files;
 
     $c->stash->{title}             = 'Thruk Panorama';
     $c->stash->{'skip_navigation'} = 1;
+    $c->stash->{'inject_stats'}    = 0;
     $c->stash->{'no_totals'}       = 1;
     $c->stash->{default_nagvis_base_url} = '';
     $c->stash->{default_nagvis_base_url} = '/'.$ENV{'OMD_SITE'}.'/nagvis' if $ENV{'OMD_SITE'};
+    $c->stash->{'panorama_debug'} = $c->config->{'panorama_debug'};
+    $c->stash->{'panorama_debug'} = 1 if $c->req->parameters->{'debug'};
 
     $c->stash->{'readonly'} = defined $c->config->{'Thruk::Plugin::Panorama'}->{'readonly'} ? $c->config->{'Thruk::Plugin::Panorama'}->{'readonly'} : 0;
     $c->stash->{'readonly'} = 1 if defined $c->req->parameters->{'readonly'};
@@ -70,7 +77,7 @@ sub index {
     }
     $c->stash->{one_tab_only}           = '';
     $c->stash->{'full_reload_interval'} = defined $c->config->{'Thruk::Plugin::Panorama'}->{'full_reload_interval'} ? $c->config->{'Thruk::Plugin::Panorama'}->{'full_reload_interval'} : 10800;
-    $c->stash->{'extjs_version'}        = "4.1.1";
+    $c->stash->{'extjs_version'}        = "4.2.2";
 
     $c->{'panorama_var'} = $c->config->{'var_path'}.'/panorama';
     Thruk::Utils::IO::mkdir_r($c->{'panorama_var'});
@@ -147,6 +154,9 @@ sub index {
         }
         elsif($task eq 'services') {
             return(_task_services($c));
+        }
+        elsif($task eq 'squares_data') {
+            return(_task_squares_data($c));
         }
         elsif($task eq 'servicesminemap') {
             return(_task_servicesminemap($c));
@@ -254,6 +264,8 @@ sub index {
 sub _js {
     my($c, $only_data) = @_;
 
+    # merge open dashboards into state
+    my $data = Thruk::Utils::get_user_data($c);
     my $open_tabs;
     if(defined $c->req->parameters->{'map'}) {
         my $dashboard = _get_dashboard_by_name($c, $c->req->parameters->{'map'});
@@ -264,57 +276,20 @@ sub _js {
         $open_tabs = [$dashboard->{'nr'}];
         $c->stash->{one_tab_only} = $dashboard->{'nr'};
         $c->stash->{title}        = $dashboard->{'tab'}->{'xdata'}->{'title'};
-    }
-
-    $c->stash->{shapes} = {};
-    my $data = Thruk::Utils::get_user_data($c);
-    # split old format into new separated format
-    # REMOVE AFTER: 01.01.2017
-    $c->stash->{state} = '';
-    if(defined $data->{'panorama'}->{'state'} and defined $data->{'panorama'}->{'state'}->{'tabpan'}) {
-        $c->stash->{state} = encode_json($data->{'panorama'}->{'state'} || {});
-        if($data->{'panorama'}->{'state'}->{'tabpan'} && $data->{'panorama'}->{'state'}->{'tabpan'} !~ m/^o/mx) {
-            # migrate data, but make backup of user data before...
-            my $file = $c->config->{'var_path'}."/users/".$c->stash->{'remote_user'};
-            copy($file, $file.'.backup_panorama_migration');
-
-            my $state  = delete $data->{'panorama'}->{'state'};
-            my $tabpan = decode_json($state->{'tabpan'});
-            $data->{'panorama'}->{'dashboards'}->{'tabpan'} = $tabpan;
-            $data->{'panorama'}->{'dashboards'}->{'tabpan'}->{open_tabs} = [];
-            delete $data->{'panorama'}->{'dashboards'}->{'tabpan'}->{'item_ids'};
-            delete $data->{'panorama'}->{'dashboards'}->{'tabpan'}->{'xdata'}->{'backends'};
-            delete $data->{'panorama'}->{'dashboards'}->{'tabpan'}->{'xdata'}->{'autohideheader'};
-            delete $data->{'panorama'}->{'dashboards'}->{'tabpan'}->{'xdata'}->{'refresh'};
-            for my $key (keys %{$state}) {
-                if($key =~ m/^tabpan\-tab/mx) {
-                    my $tabdata = decode_json($state->{$key});
-                    my $dashboard = {
-                        'id'    => 'new',
-                        'tab'   => $tabdata,
-                    };
-                    my $window_ids = $tabdata->{'window_ids'} || $tabdata->{'xdata'}->{'window_ids'};
-                    for my $id (@{$window_ids}) {
-                        my $win = $state->{$id};
-                        next if !defined $win;
-                        next if $win eq 'null';
-                        $dashboard->{$id} = decode_json($win);
-                    }
-                    delete $tabdata->{'xdata'}->{'window_ids'};
-                    delete $tabdata->{'window_ids'};
-                    $dashboard = _save_dashboard($c, $dashboard);
-                    $data->{'panorama'}->{'dashboards'}->{'tabpan'}->{'activeTab'} = $key if $key eq $tabpan->{'activeTab'};
-                    push @{$data->{'panorama'}->{'dashboards'}->{'tabpan'}->{open_tabs}}, $dashboard->{'id'};
-                }
-            }
-            Thruk::Utils::store_user_data($c, $data);
+    } elsif($c->cookie('thruk_panorama_tabs')) {
+        $open_tabs = [split(/\s*:\s*/mx, $c->cookie('thruk_panorama_tabs')->value)];
+        $data->{'panorama'}->{dashboards}->{'tabpan'}->{'open_tabs'} = $open_tabs;
+        if($c->cookie('thruk_panorama_active')) {
+            $data->{'panorama'}->{dashboards}->{'tabpan'}->{'activeTab'} = 'tabpan-tab_'.$c->cookie('thruk_panorama_active')->value;
         }
     }
 
-    # merge open dashboards into state
+    $c->stash->{shapes} = {};
+    $c->stash->{state}  = '';
+
+    # restore last open tab
     if($open_tabs || ($data->{'panorama'}->{dashboards} and $data->{'panorama'}->{dashboards}->{'tabpan'}->{'open_tabs'})) {
         my $shapes         = {};
-        $c->stash->{state} = '';
         $open_tabs         = $data->{'panorama'}->{dashboards}->{'tabpan'}->{'open_tabs'} unless $open_tabs;
         for my $nr (@{$open_tabs}) {
             my $dashboard = Thruk::Utils::Panorama::load_dashboard($c, $nr);
@@ -363,7 +338,15 @@ sub _js {
     my $action_menu_items = [];
     if($c->config->{'action_menu_items'}) {
         for my $name (sort keys %{$c->config->{'action_menu_items'}}) {
-            push @{$action_menu_items}, [$name, $c->config->{'action_menu_items'}->{$name}];
+            my $data = $c->config->{'action_menu_items'}->{$name};
+            if($data =~ m%^file://(.*)$%mx) {
+                my $sourcefile = $1;
+                $data = "[]";
+                if(-r $sourcefile) {
+                    $data = read_file($sourcefile);
+                }
+            }
+            push @{$action_menu_items}, [$name, $data];
         }
     }
     $c->stash->{action_menu_items} = $action_menu_items;
@@ -379,6 +362,9 @@ sub _js {
     my($lon,$lat) = split(/\s*,\s*/mx, ($c->config->{'Thruk::Plugin::Panorama'}->{'geo_map_default_center'} || '13.74,47.77'));
     $c->stash->{default_map_lon} = $lon;
     $c->stash->{default_map_lat} = $lat;
+
+    my $default_state_order = $c->config->{'Thruk::Plugin::Panorama'}->{'default_state_order'};
+    $c->stash->{default_state_order} = [split(/\s*,\s*/mx, $default_state_order)];
 
     unless($only_data) {
         $c->res->headers->content_type('text/javascript; charset=UTF-8');
@@ -572,7 +558,7 @@ sub _task_status {
             next if $c->stash->{'has_error'};
             delete $c->req->parameters->{'backend'};
             delete $c->req->parameters->{'backends'};
-            if($backends && scalar @{$backends} > 0) {
+            if($backends && scalar @{$backends} > 0 && (scalar @{$backends} != 1 || $backends->[0] ne '')) {
                 Thruk::Action::AddDefaults::_set_enabled_backends($c, $backends);
             } else {
                 Thruk::Action::AddDefaults::_set_enabled_backends($c, $tab_backends);
@@ -674,14 +660,14 @@ sub _task_upload {
     my $location = $c->req->parameters->{'location'};
     if(!$type || !$location || !$c->req->uploads->{$type}) {
         # must be text/html result, otherwise extjs form result handler dies
-        $c->stash->{text} = encode_json({ 'msg' => 'missing properties in fileupload.', success => JSON::XS::false });
+        $c->stash->{text} = encode_json({ 'msg' => 'missing properties in fileupload.', success => Cpanel::JSON::XS::false });
         return;
     }
     $location =~ s|/$||gmx;
 
     if($c->config->{'demo_mode'}) {
         # must be text/html result, otherwise extjs form result handler dies
-        $c->stash->{text} = encode_json({ 'msg' => 'fileupload is disabled in demo mode.', success => JSON::XS::false });
+        $c->stash->{text} = encode_json({ 'msg' => 'fileupload is disabled in demo mode.', success => Cpanel::JSON::XS::false });
         return;
     }
 
@@ -690,27 +676,28 @@ sub _task_upload {
 
     if(!-w $folder.'/.') {
         # must be text/html result, otherwise extjs form result handler dies
-        $c->stash->{text} = encode_json({ 'msg' => 'Fileupload must use existing and writable folder.', success => JSON::XS::false });
+        $c->stash->{text} = encode_json({ 'msg' => 'Fileupload must use existing and writable folder.', success => Cpanel::JSON::XS::false });
         return;
     }
 
     if($upload->{'size'} > (50*1024*1024)) { # not more than 50MB
         # must be text/html result, otherwise extjs form result handler dies
-        $c->stash->{text} = encode_json({ 'msg' => 'Fileupload exceeds the allowed filesize of 50MB.', success => JSON::XS::false });
+        $c->stash->{text} = encode_json({ 'msg' => 'Fileupload exceeds the allowed filesize of 50MB.', success => Cpanel::JSON::XS::false });
         return;
     }
 
     my $filename = $upload->{'filename'};
+    $filename =~ s|^/||gmx;
     if($filename !~ m/^[a-z0-9_\- ]+\.(jpeg|jpg|gif|png|svg)$/mxi) {
         # must be text/html result, otherwise extjs form result handler dies
-        $c->stash->{text} = encode_json({ 'msg' => 'Fileupload contains invalid characters (a-z0-9_- ) in filename.', success => JSON::XS::false });
+        $c->stash->{text} = encode_json({ 'msg' => 'Fileupload contains invalid characters (a-z0-9_- ) in filename.', success => Cpanel::JSON::XS::false });
         return;
     }
 
     my $newlocation = $folder.'/'.$filename;
     if(-s $newlocation && !$c->stash->{'is_admin'}) {
         # must be text/html result, otherwise extjs form result handler dies
-        $c->stash->{text} = encode_json({ 'msg' => 'Only administrator may overwrite existing files.', success => JSON::XS::false });
+        $c->stash->{text} = encode_json({ 'msg' => 'Only administrator may overwrite existing files.', success => Cpanel::JSON::XS::false });
         return;
     }
 
@@ -719,12 +706,12 @@ sub _task_upload {
     };
     if($@) {
         # must be text/html result, otherwise extjs form result handler dies
-        $c->stash->{text} = encode_json({ 'msg' => $@, success => JSON::XS::false });
+        $c->stash->{text} = encode_json({ 'msg' => $@, success => Cpanel::JSON::XS::false });
         return;
     }
 
     # must be text/html result, otherwise extjs form result handler dies
-    $c->stash->{text} = encode_json({ 'msg' => 'Upload successfull', success => JSON::XS::true, filename => $filename });
+    $c->stash->{text} = encode_json({ 'msg' => 'Upload successfull', success => Cpanel::JSON::XS::true, filename => $filename });
     return;
 }
 
@@ -736,14 +723,14 @@ sub _task_uploadecho {
 
     if(!$c->req->uploads->{'file'}) {
         # must be text/html result, otherwise extjs form result handler dies
-        $c->stash->{text} = encode_json({ 'msg' => 'missing file in fileupload.', success => JSON::XS::false });
+        $c->stash->{text} = encode_json({ 'msg' => 'missing file in fileupload.', success => Cpanel::JSON::XS::false });
         return;
     }
 
     my $upload = $c->req->uploads->{'file'};
     if($upload->{'size'} > (50*1024*1024)) { # not more than 50MB
         # must be text/html result, otherwise extjs form result handler dies
-        $c->stash->{text} = encode_json({ 'msg' => 'Fileupload exceeds the allowed filesize of 50MB.', success => JSON::XS::false });
+        $c->stash->{text} = encode_json({ 'msg' => 'Fileupload exceeds the allowed filesize of 50MB.', success => Cpanel::JSON::XS::false });
         return;
     }
 
@@ -751,7 +738,7 @@ sub _task_uploadecho {
     unlink($upload->{'tempname'});
 
     # must be text/html result, otherwise extjs form result handler dies
-    $c->stash->{text} = encode_json({ 'msg' => 'Upload successfull', success => JSON::XS::true, content => $content });
+    $c->stash->{text} = encode_json({ 'msg' => 'Upload successfull', success => Cpanel::JSON::XS::true, content => $content });
     return;
 }
 
@@ -840,14 +827,14 @@ sub _task_load_dashboard {
 
     if(!$c->req->uploads->{'file'}) {
         # must be text/html result, otherwise extjs form result handler dies
-        $c->stash->{text} = encode_json({ 'msg' => 'missing file in fileupload.', success => JSON::XS::false });
+        $c->stash->{text} = encode_json({ 'msg' => 'missing file in fileupload.', success => Cpanel::JSON::XS::false });
         return;
     }
 
     my $upload = $c->req->uploads->{'file'};
     if($upload->{'size'} > (50*1024*1024)) { # not more than 50MB
         # must be text/html result, otherwise extjs form result handler dies
-        $c->stash->{text} = encode_json({ 'msg' => 'File exceeds the allowed filesize of 50MB.', success => JSON::XS::false });
+        $c->stash->{text} = encode_json({ 'msg' => 'File exceeds the allowed filesize of 50MB.', success => Cpanel::JSON::XS::false });
         return;
     }
 
@@ -861,7 +848,7 @@ sub _task_load_dashboard {
     };
     if($@) {
         # must be text/html result, otherwise extjs form result handler dies
-        $c->stash->{text} = encode_json({ 'msg' => 'This is not a valid dashboard', success => JSON::XS::false });
+        $c->stash->{text} = encode_json({ 'msg' => 'This is not a valid dashboard', success => Cpanel::JSON::XS::false });
         return;
     }
 
@@ -882,18 +869,19 @@ sub _task_load_dashboard {
             };
             if($@) {
                 $c->log->error('Usercontent upload for '.$file.' failed: '.$@);
-                $c->stash->{text} = encode_json({ 'msg' => 'Usercontent upload for '.$file.' failed.', success => JSON::XS::false });
+                $c->stash->{text} = encode_json({ 'msg' => 'Usercontent upload for '.$file.' failed.', success => Cpanel::JSON::XS::false });
                 return;
             }
         }
         delete $data->{'usercontent'};
     }
-    $data->{'id'} = 'new';
+    $data->{'id'}   = 'new';
+    $data->{'user'} = $c->stash->{'remote_user'};
     $data = _save_dashboard($c, $data);
     my $newid = $data->{'id'};
 
     # must be text/html result, otherwise extjs form result handler dies
-    $c->stash->{text} = encode_json({ 'msg' => 'Import successfull', success => JSON::XS::true, newid => $newid });
+    $c->stash->{text} = encode_json({ 'msg' => 'Import successfull', success => Cpanel::JSON::XS::true, newid => $newid });
     return;
 }
 
@@ -924,7 +912,7 @@ sub _get_wms_provider {
         $data =~ s/\s*$//gmx;
         next unless $data;
         eval {
-            my $test = JSON::XS::decode_json($data);
+            my $test = Cpanel::JSON::XS::decode_json($data);
         };
         if($@) {
             print STDERR "error in wms provider: ".$@;
@@ -943,7 +931,7 @@ sub _task_timezones {
 
     my $query = $c->req->parameters->{'query'} || '';
     my $data  = [];
-    for my $tz (@{_get_timezone_data($c)}) {
+    for my $tz (@{Thruk::Utils::get_timezone_data($c)}) {
         next if($query && $tz->{'text'} !~ m/$query/mxi);
         push @{$data}, $tz;
     }
@@ -951,51 +939,6 @@ sub _task_timezones {
     my $json = { 'rc' => 0, 'data' => $data };
     _add_misc_details($c, undef, $json);
     return $c->render(json => $json);
-}
-
-##########################################################
-sub _get_timezone_data {
-    my($c) = @_;
-
-    my $cache = Thruk::Utils::Cache->new($c->config->{'var_path'}.'/timezones.cache');
-    my $data  = $cache->get('timezones');
-    my $timestamp = Thruk::Utils::format_date(time(), "%Y-%m-%d %H");
-    if(defined $data && $data->{'timestamp'} eq $timestamp) {
-        return($data->{'timezones'});
-    }
-
-    my $timezones = [];
-    my $localname = 'Local Browser';
-    push @{$timezones}, {
-        text   => $localname,
-        abbr   => '',
-        offset => 0,
-    };
-    load DateTime;
-    load DateTime::TimeZone;
-    my($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime();
-    for my $name (DateTime::TimeZone->all_names) {
-        my $dt = DateTime->new(
-            year      => $year+1900,
-            month     => $mon+1,
-            day       => $mday,
-            hour      => $hour,
-            minute    => $min,
-            second    => $sec,
-            time_zone => $name,
-        );
-        push @{$timezones}, {
-            text   => $name,
-            abbr   => $dt->time_zone()->short_name_for_datetime($dt),
-            offset => $dt->offset(),
-            isdst  => $dt->is_dst() ? JSON::XS::true : JSON::XS::false,
-        };
-    }
-    $cache->set('timezones', {
-        timestamp => $timestamp,
-        timezones => $timezones,
-    });
-    return($timezones);
 }
 
 
@@ -1011,10 +954,14 @@ sub _task_availability {
     }
 
     $c->stats->profile(begin => "_task_avail");
-    my $jobid = Thruk::Utils::External::perl($c, { expr       => 'Thruk::Controller::panorama::_avail_update($c)',
-                                                   message    => 'availability is being calculated',
-                                                   background => 1,
-                                            });
+    if($c->req->parameters->{'force'}) {
+        Thruk::Controller::panorama::_avail_update($c);
+    } else {
+        Thruk::Utils::External::perl($c, { expr       => 'Thruk::Controller::panorama::_avail_update($c)',
+                                           message    => 'availability is being calculated',
+                                           background => 1,
+                                        });
+    }
     my $res = _avail_update($c, 1);
     $c->stats->profile(end => "_task_avail");
     return($res);
@@ -1095,8 +1042,9 @@ sub _avail_update {
                         }
                     }
                     my $cached = $cache->get(@cache_prefix, 'filter', $filtername, $key);
+                    $cache->set(@cache_prefix, 'filter', $filtername, $key, {val => -1, time => $now}) if(!$cached && !$cached_only);
                     $data->{$panel}->{$key} = _avail_calc($c, $cached_only, $now, $cached, $opts, undef, undef, 1);
-                    $cache->set(@cache_prefix, 'filter', $filtername, $key, {val => $data->{$panel}->{$key}, time => $now}) if(!$cached || $cached->{'time'} == $now);
+                    $cache->set(@cache_prefix, 'filter', $filtername, $key, {val => $data->{$panel}->{$key}, time => $now}) if !$cached_only;
                 }
             }
         }
@@ -1110,11 +1058,12 @@ sub _avail_update {
                 for my $key (keys %{$in->{$panel}}) {
                     my $opts   = $in->{$panel}->{$key}->{opts};
                     my $cached = $cache->get(@cache_prefix, 'hostgroups', $group, $key);
+                    $cache->set(@cache_prefix, 'hostgroups', $group, $key, {val => -1, time => $now}) if(!$cached && !$cached_only);
                     if($opts->{'incl_svc'} || (!$opts->{'incl_hst'} && !$opts->{'incl_svc'})) {
                         $c->req->parameters->{include_host_services} = 1;
                     }
                     $data->{$panel}->{$key} = _avail_calc($c, $cached_only, $now, $cached, $opts);
-                    $cache->set(@cache_prefix, 'hostgroups', $group, $key, {val => $data->{$panel}->{$key}, time => $now}) if(!$cached || $cached->{'time'} == $now);
+                    $cache->set(@cache_prefix, 'hostgroups', $group, $key, {val => $data->{$panel}->{$key}, time => $now}) if !$cached_only;
                 }
             }
         }
@@ -1126,8 +1075,9 @@ sub _avail_update {
             for my $panel (@{$types->{'servicegroups'}->{$group}}) {
                 for my $key (keys %{$in->{$panel}}) {
                     my $cached = $cache->get(@cache_prefix, 'servicegroups', $group, $key);
+                    $cache->set(@cache_prefix, 'servicegroups', $group, $key, {val => -1, time => $now}) if(!$cached && !$cached_only);
                     $data->{$panel}->{$key} = _avail_calc($c, $cached_only, $now, $cached, $in->{$panel}->{$key}->{opts});
-                    $cache->set(@cache_prefix, 'servicegroups', $group, $key, {val => $data->{$panel}->{$key}, time => $now}) if(!$cached || $cached->{'time'} == $now);
+                    $cache->set(@cache_prefix, 'servicegroups', $group, $key, {val => $data->{$panel}->{$key}, time => $now}) if !$cached_only;
                 }
             }
         }
@@ -1140,8 +1090,9 @@ sub _avail_update {
             for my $panel (@{$types->{'hosts'}->{$host}}) {
                 for my $key (keys %{$in->{$panel}}) {
                     my $cached = $cache->get(@cache_prefix, 'hosts', $host, $key);
+                    $cache->set(@cache_prefix, 'hosts', $host, $key, {val => -1, time => $now}) if(!$cached && !$cached_only);
                     $data->{$panel}->{$key} = _avail_calc($c, $cached_only, $now, $cached, $in->{$panel}->{$key}->{opts}, $host);
-                    $cache->set(@cache_prefix, 'hosts', $host, $key, {val => $data->{$panel}->{$key}, time => $now}) if(!$cached || $cached->{'time'} == $now);
+                    $cache->set(@cache_prefix, 'hosts', $host, $key, {val => $data->{$panel}->{$key}, time => $now}) if !$cached_only;
                 }
             }
         }
@@ -1155,8 +1106,9 @@ sub _avail_update {
                 for my $panel (@{$types->{'services'}->{$host}->{$service}}) {
                     for my $key (keys %{$in->{$panel}}) {
                         my $cached = $cache->get(@cache_prefix, 'services', $host, $service, $key);
+                        $cache->set(@cache_prefix, 'services', $host, $service, $key, {val => -1, time => $now}) if(!$cached && !$cached_only);
                         $data->{$panel}->{$key} = _avail_calc($c, $cached_only, $now, $cached, $in->{$panel}->{$key}->{opts}, $host, $service);
-                        $cache->set(@cache_prefix, 'services', $host, $service, $key, {val => $data->{$panel}->{$key}, time => $now}) if(!$cached || $cached->{'time'} == $now);
+                        $cache->set(@cache_prefix, 'services', $host, $service, $key, {val => $data->{$panel}->{$key}, time => $now}) if !$cached_only;
                     }
                 }
             }
@@ -1172,7 +1124,7 @@ sub _avail_update {
 
     my $json = { data => $data };
 
-    $c->stats->profile(end => "_avail_clean_cache");
+    $c->stats->profile(end => "_avail_update");
     return $c->render(json => $json);
 }
 
@@ -1199,7 +1151,7 @@ sub _avail_clean_cache {
 ##########################################################
 sub _avail_calc {
     my($c, $cached_only, $now, $cached, $opts, $host, $service, $filter) = @_;
-    my $duration = Thruk::Utils::Status::convert_time_amount($opts->{'d'});
+    my $duration = Thruk::Utils::expand_duration($opts->{'d'});
     my $unavailable_states = {'down' => 1, 'unreachable' => 1, 'critical' => 1, 'unknown' => 1};
     my $cache_retrieve_factor = $c->config->{'Thruk::Plugin::Panorama'}->{'cache_retrieve_factor'} || 0.0025; # ~ once a day for yearly values, every ~ 3.5 minutes for daily averages
 
@@ -1235,6 +1187,30 @@ sub _avail_calc {
     $c->req->parameters->{t2}            = time();
     $c->req->parameters->{t1}            = $c->req->parameters->{t2} - $duration;
     $c->req->parameters->{rpttimeperiod} = $opts->{'tm'};
+    if($opts->{'h'}) {
+        $unavailable_states->{'down'}        = 0;
+        $unavailable_states->{'unreachable'} = 0;
+        for my $chr (split//mx, lc $opts->{'h'}) {
+            if($chr eq 'd') { $unavailable_states->{'down'}        = 1; }
+            if($chr eq 'u') { $unavailable_states->{'unreachable'} = 1; }
+        }
+    }
+    if($opts->{'s'}) {
+        $unavailable_states->{'warning'}  = 0;
+        $unavailable_states->{'critical'} = 0;
+        $unavailable_states->{'unknown'}  = 0;
+        for my $chr (split//mx, lc $opts->{'s'}) {
+            if($chr eq 'w') { $unavailable_states->{'warning'}  = 1; }
+            if($chr eq 'c') { $unavailable_states->{'critical'} = 1; }
+            if($chr eq 'u') { $unavailable_states->{'unknown'}  = 1; }
+        }
+    }
+    # set downtimes as unavailable too
+    if(defined $opts->{'downtime'} && !$opts->{'downtime'}) {
+        for my $key (keys %{$unavailable_states}) {
+            $unavailable_states->{$key."_downtime"} = 1;
+        }
+    }
     if(!$filter) {
         eval {
             Thruk::Utils::Avail::calculate_availability($c)
@@ -1387,13 +1363,13 @@ sub _task_server_stats {
 
     my $json = {
         columns => [
-            { 'header' => 'Cat',    dataIndex => 'cat',   hidden => JSON::XS::true },
+            { 'header' => 'Cat',    dataIndex => 'cat',   hidden => Cpanel::JSON::XS::true },
             { 'header' => 'Type',   dataIndex => 'type',  width => 60, align => 'right' },
             { 'header' => 'Value',  dataIndex => 'value', width => 65, align => 'right', renderer => 'TP.render_systat_value' },
             { 'header' => 'Graph',  dataIndex => 'graph', flex  => 1,                    renderer => 'TP.render_systat_graph' },
-            { 'header' => 'Warn',   dataIndex => 'warn',  hidden => JSON::XS::true },
-            { 'header' => 'Crit',   dataIndex => 'crit',  hidden => JSON::XS::true },
-            { 'header' => 'Max',    dataIndex => 'max',   hidden => JSON::XS::true },
+            { 'header' => 'Warn',   dataIndex => 'warn',  hidden => Cpanel::JSON::XS::true },
+            { 'header' => 'Crit',   dataIndex => 'crit',  hidden => Cpanel::JSON::XS::true },
+            { 'header' => 'Max',    dataIndex => 'max',   hidden => Cpanel::JSON::XS::true },
         ],
         data  => [],
         group => 'cat',
@@ -1493,7 +1469,7 @@ sub _task_show_logs {
 
     my $filter;
     my $end   = time();
-    my $start = $end - Thruk::Utils::Status::convert_time_amount($c->req->parameters->{'time'} || '15m');
+    my $start = $end - Thruk::Utils::expand_duration($c->req->parameters->{'time'} || '15m');
     push @{$filter}, { time => { '>=' => $start }};
     push @{$filter}, { time => { '<=' => $end }};
 
@@ -1501,13 +1477,12 @@ sub _task_show_logs {
     my $pattern         = $c->req->parameters->{'pattern'};
     my $exclude_pattern = $c->req->parameters->{'exclude'};
     if(defined $pattern and $pattern !~ m/^\s*$/mx) {
-        push @{$filter}, { message => { '~~' => $pattern }};
+        push @{$filter}, { message => { '~~' => Thruk::Utils::clean_regex($pattern) }};
     }
     if(defined $exclude_pattern and $exclude_pattern !~ m/^\s*$/mx) {
-        push @{$filter}, { message => { '!~~' => $exclude_pattern }};
+        push @{$filter}, { message => { '!~~' => Thruk::Utils::clean_regex($exclude_pattern) }};
     }
     my $total_filter = Thruk::Utils::combine_filter('-and', $filter);
-
     return if $c->{'db'}->renew_logcache($c);
     my $data = $c->{'db'}->get_logs(filter => [$total_filter, Thruk::Utils::Auth::get_auth_filter($c, 'log')], sort => {'DESC' => 'time'});
 
@@ -1550,34 +1525,22 @@ sub _task_site_status {
 
     my $json = {
         columns => [
-            { 'header' => 'Id',               dataIndex => 'id',                      width => 45, hidden => JSON::XS::true },
+            { 'header' => 'Id',               dataIndex => 'id',                      width => 45, hidden => Cpanel::JSON::XS::true },
             { 'header' => '',                 dataIndex => 'icon',                    width => 30, tdCls => 'icon_column', renderer => 'TP.render_icon_site' },
-            { 'header' => 'Category',         dataIndex => 'category',                width => 60, hidden => JSON::XS::true },
-            { 'header' => 'Section',          dataIndex => 'section',                 width => 60, hidden => JSON::XS::true },
+            { 'header' => 'Category',         dataIndex => 'category',                width => 60, hidden => Cpanel::JSON::XS::true },
+            { 'header' => 'Section',          dataIndex => 'section',                 width => 60, hidden => Cpanel::JSON::XS::true },
             { 'header' => 'Site',             dataIndex => 'site',                    width => 60, flex => 1 },
             { 'header' => 'Version',          dataIndex => 'version',                 width => 50, renderer => 'TP.add_title' },
             { 'header' => 'Runtime',          dataIndex => 'runtime',                 width => 85 },
-            { 'header' => 'Notifications',    dataIndex => 'enable_notifications',    width => 65, hidden => JSON::XS::true, align => 'center', renderer => 'TP.render_enabled_switch' },
-            { 'header' => 'Svc Checks',       dataIndex => 'execute_service_checks',  width => 65, hidden => JSON::XS::true, align => 'center', renderer => 'TP.render_enabled_switch' },
-            { 'header' => 'Hst Checks',       dataIndex => 'execute_host_checks',     width => 65, hidden => JSON::XS::true, align => 'center', renderer => 'TP.render_enabled_switch' },
-            { 'header' => 'Eventhandlers',    dataIndex => 'enable_event_handlers',   width => 65, hidden => JSON::XS::true, align => 'center', renderer => 'TP.render_enabled_switch' },
-            { 'header' => 'Performance Data', dataIndex => 'process_performance_data',width => 65, hidden => JSON::XS::true, align => 'center', renderer => 'TP.render_enabled_switch' },
+            { 'header' => 'Notifications',    dataIndex => 'enable_notifications',    width => 65, hidden => Cpanel::JSON::XS::true, align => 'center', renderer => 'TP.render_enabled_switch' },
+            { 'header' => 'Svc Checks',       dataIndex => 'execute_service_checks',  width => 65, hidden => Cpanel::JSON::XS::true, align => 'center', renderer => 'TP.render_enabled_switch' },
+            { 'header' => 'Hst Checks',       dataIndex => 'execute_host_checks',     width => 65, hidden => Cpanel::JSON::XS::true, align => 'center', renderer => 'TP.render_enabled_switch' },
+            { 'header' => 'Eventhandlers',    dataIndex => 'enable_event_handlers',   width => 65, hidden => Cpanel::JSON::XS::true, align => 'center', renderer => 'TP.render_enabled_switch' },
+            { 'header' => 'Performance Data', dataIndex => 'process_performance_data',width => 65, hidden => Cpanel::JSON::XS::true, align => 'center', renderer => 'TP.render_enabled_switch' },
         ],
         data    => [],
     };
 
-    # get sections
-    for my $category (keys %{$c->{'db'}->{'sections'}}) {
-        for my $section (keys %{$c->{'db'}->{'sections'}->{$category}}) {
-            for my $name (keys %{$c->{'db'}->{'sections'}->{$category}->{$section}}) {
-                my $backends = $c->{'db'}->{'sections'}->{$category}->{$section}->{$name};
-                for my $b (@{$backends}) {
-                    $c->stash->{'pi_detail'}->{$b->{'key'}}->{'category'} = $category;
-                    $c->stash->{'pi_detail'}->{$b->{'key'}}->{'section'}  = $section;
-                }
-            }
-        }
-    }
     for my $key (@{$c->stash->{'backends'}}) {
         next if($backend_filter && !defined $backend_filter->{$key});
         my $b    = $c->stash->{'backend_detail'}->{$key};
@@ -1597,9 +1560,11 @@ sub _task_site_status {
             site     => $b->{'name'},
             version  => $program_version,
             runtime  => $runtime,
+            section  => $b->{'section'},
+            category => $b->{'section'}, # keep for backwards compatibility
         };
         for my $attr (qw/enable_notifications execute_host_checks execute_service_checks
-                      enable_event_handlers process_performance_data category section/) {
+                      enable_event_handlers process_performance_data/) {
             $row->{$attr} = $d->{$attr};
         }
         push @{$json->{'data'}}, $row;
@@ -1619,7 +1584,11 @@ sub _task_hosts {
     $c->req->parameters->{'entries'} = $c->req->parameters->{'pageSize'};
     $c->req->parameters->{'page'}    = $c->req->parameters->{'currentPage'};
 
-    my $data = $c->{'db'}->get_hosts(filter => [ Thruk::Utils::Auth::get_auth_filter($c, 'hosts'), $hostfilter ], pager => 1, extra_columns => [qw/long_plugin_output/]);
+    my $data = $c->{'db'}->get_hosts(filter        => [ Thruk::Utils::Auth::get_auth_filter($c, 'hosts'), $hostfilter ],
+                                     pager         => 1,
+                                     extra_columns => [qw/long_plugin_output/],
+                                     sort          => { ASC => [ 'name' ] },
+                                    );
 
     my $json = {
         columns => [
@@ -1633,39 +1602,39 @@ sub _task_hosts {
             { 'header' => 'Status Information',     flex  => 1,   dataIndex => 'plugin_output',                        renderer => 'TP.render_plugin_output' },
             { 'header' => 'Performance',            width => 80,  dataIndex => 'perf_data',                            renderer => 'TP.render_perfbar' },
 
-            { 'header' => 'Parents',                  dataIndex => 'parents',                     hidden => JSON::XS::true, renderer => 'TP.render_clickable_host_list' },
-            { 'header' => 'Current Attempt',          dataIndex => 'current_attempt',             hidden => JSON::XS::true },
-            { 'header' => 'Max Check Attempts',       dataIndex => 'max_check_attempts',          hidden => JSON::XS::true },
-            { 'header' => 'Last State Change',        dataIndex => 'last_state_change',           hidden => JSON::XS::true, renderer => 'TP.render_date' },
-            { 'header' => 'Check Type',               dataIndex => 'check_type',                  hidden => JSON::XS::true, renderer => 'TP.render_check_type' },
-            { 'header' => 'Site ID',                  dataIndex => 'peer_key',                    hidden => JSON::XS::true },
-            { 'header' => 'Has Been Checked',         dataIndex => 'has_been_checked',            hidden => JSON::XS::true, renderer => 'TP.render_yes_no' },
-            { 'header' => 'Active Checks Enabled',    dataIndex => 'active_checks_enabled',       hidden => JSON::XS::true, renderer => 'TP.render_yes_no' },
-            { 'header' => 'Accept Passive Checks',    dataIndex => 'accept_passive_checks',       hidden => JSON::XS::true, renderer => 'TP.render_yes_no' },
-            { 'header' => 'Next Check',               dataIndex => 'next_check',                  hidden => JSON::XS::true, renderer => 'TP.render_date' },
-            { 'header' => 'Notification Number',      dataIndex => 'current_notification_number', hidden => JSON::XS::true },
-            { 'header' => 'First Notification Delay', dataIndex => 'first_notification_delay',    hidden => JSON::XS::true },
-            { 'header' => 'Notifications Enabled',    dataIndex => 'notifications_enabled',       hidden => JSON::XS::true, renderer => 'TP.render_enabled_switch' },
-            { 'header' => 'Is Flapping',              dataIndex => 'is_flapping',                 hidden => JSON::XS::true, renderer => 'TP.render_yes_no' },
-            { 'header' => 'Acknowledged',             dataIndex => 'acknowledged',                hidden => JSON::XS::true, renderer => 'TP.render_yes_no' },
-            { 'header' => 'Comments',                 dataIndex => 'comments',                    hidden => JSON::XS::true, hideable => JSON::XS::false },
-            { 'header' => 'Scheduled Downtime Depth', dataIndex => 'scheduled_downtime_depth',    hidden => JSON::XS::true },
-            { 'header' => 'Action Url',               dataIndex => 'action_url_expanded',         hidden => JSON::XS::true, renderer => 'TP.render_action_url' },
-            { 'header' => 'Notes url',                dataIndex => 'notes_url_expanded',          hidden => JSON::XS::true, renderer => 'TP.render_notes_url' },
-            { 'header' => 'Icon Image',               dataIndex => 'icon_image_expanded',         hidden => JSON::XS::true, renderer => 'TP.render_icon_url' },
-            { 'header' => 'Icon Image Alt',           dataIndex => 'icon_image_alt',              hidden => JSON::XS::true, hideable => JSON::XS::false },
-            { 'header' => 'Custom Variable Names',    dataIndex => 'custom_variable_names',       hidden => JSON::XS::true, hideable => JSON::XS::false },
-            { 'header' => 'Custom Variable Values',   dataIndex => 'custom_variable_values',      hidden => JSON::XS::true, hideable => JSON::XS::false },
-            { 'header' => 'Long Plugin Output',       dataIndex => 'long_plugin_output',          hidden => JSON::XS::true, renderer => 'TP.render_long_pluginoutput' },
+            { 'header' => 'Parents',                  dataIndex => 'parents',                     hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_clickable_host_list' },
+            { 'header' => 'Current Attempt',          dataIndex => 'current_attempt',             hidden => Cpanel::JSON::XS::true },
+            { 'header' => 'Max Check Attempts',       dataIndex => 'max_check_attempts',          hidden => Cpanel::JSON::XS::true },
+            { 'header' => 'Last State Change',        dataIndex => 'last_state_change',           hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_date' },
+            { 'header' => 'Check Type',               dataIndex => 'check_type',                  hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_check_type' },
+            { 'header' => 'Site ID',                  dataIndex => 'peer_key',                    hidden => Cpanel::JSON::XS::true },
+            { 'header' => 'Has Been Checked',         dataIndex => 'has_been_checked',            hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_yes_no' },
+            { 'header' => 'Active Checks Enabled',    dataIndex => 'active_checks_enabled',       hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_yes_no' },
+            { 'header' => 'Accept Passive Checks',    dataIndex => 'accept_passive_checks',       hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_yes_no' },
+            { 'header' => 'Next Check',               dataIndex => 'next_check',                  hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_date' },
+            { 'header' => 'Notification Number',      dataIndex => 'current_notification_number', hidden => Cpanel::JSON::XS::true },
+            { 'header' => 'First Notification Delay', dataIndex => 'first_notification_delay',    hidden => Cpanel::JSON::XS::true },
+            { 'header' => 'Notifications Enabled',    dataIndex => 'notifications_enabled',       hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_enabled_switch' },
+            { 'header' => 'Is Flapping',              dataIndex => 'is_flapping',                 hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_yes_no' },
+            { 'header' => 'Acknowledged',             dataIndex => 'acknowledged',                hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_yes_no' },
+            { 'header' => 'Comments',                 dataIndex => 'comments',                    hidden => Cpanel::JSON::XS::true, hideable => Cpanel::JSON::XS::false },
+            { 'header' => 'Scheduled Downtime Depth', dataIndex => 'scheduled_downtime_depth',    hidden => Cpanel::JSON::XS::true },
+            { 'header' => 'Action Url',               dataIndex => 'action_url_expanded',         hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_action_url' },
+            { 'header' => 'Notes url',                dataIndex => 'notes_url_expanded',          hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_notes_url' },
+            { 'header' => 'Icon Image',               dataIndex => 'icon_image_expanded',         hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_icon_url' },
+            { 'header' => 'Icon Image Alt',           dataIndex => 'icon_image_alt',              hidden => Cpanel::JSON::XS::true, hideable => Cpanel::JSON::XS::false },
+            { 'header' => 'Custom Variable Names',    dataIndex => 'custom_variable_names',       hidden => Cpanel::JSON::XS::true, hideable => Cpanel::JSON::XS::false },
+            { 'header' => 'Custom Variable Values',   dataIndex => 'custom_variable_values',      hidden => Cpanel::JSON::XS::true, hideable => Cpanel::JSON::XS::false },
+            { 'header' => 'Long Plugin Output',       dataIndex => 'long_plugin_output',          hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_long_pluginoutput' },
 
-            { 'header' => 'Last Time Up',          dataIndex => 'last_time_up',          hidden => JSON::XS::true, renderer => 'TP.render_date' },
-            { 'header' => 'Last Time Unreachable', dataIndex => 'last_time_unreachable', hidden => JSON::XS::true, renderer => 'TP.render_date' },
-            { 'header' => 'Last Time Down',        dataIndex => 'last_time_down',        hidden => JSON::XS::true, renderer => 'TP.render_date' },
+            { 'header' => 'Last Time Up',          dataIndex => 'last_time_up',          hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_date' },
+            { 'header' => 'Last Time Unreachable', dataIndex => 'last_time_unreachable', hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_date' },
+            { 'header' => 'Last Time Down',        dataIndex => 'last_time_down',        hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_date' },
         ],
         data        => $c->stash->{'data'},
         totalCount  => $c->stash->{'pager'}->{'total_entries'},
         currentPage => $c->stash->{'pager'}->{'current_page'},
-        paging      => JSON::XS::true,
+        paging      => Cpanel::JSON::XS::true,
     };
 
     if($c->stash->{'escape_html_tags'} or $c->stash->{'show_long_plugin_output'} eq 'inline') {
@@ -1689,15 +1658,19 @@ sub _task_services {
     $c->req->parameters->{'entries'} = $c->req->parameters->{'pageSize'};
     $c->req->parameters->{'page'}    = $c->req->parameters->{'currentPage'};
 
-    $c->{'db'}->get_services(filter => [ Thruk::Utils::Auth::get_auth_filter($c, 'services'), $servicefilter], pager => 1, extra_columns => [qw/long_plugin_output/]);
+    $c->{'db'}->get_services(filter        => [ Thruk::Utils::Auth::get_auth_filter($c, 'services'), $servicefilter],
+                             pager         => 1,
+                             extra_columns => [qw/long_plugin_output/],
+                             sort          => { ASC => [ 'host_name',   'description' ] },
+                            );
 
     my $json = {
         columns => [
             { 'header' => 'Hostname',               width => 120, dataIndex => 'host_display_name',                    renderer => 'TP.render_service_host' },
-            { 'header' => 'Host',                                 dataIndex => 'host_name',         hidden => JSON::XS::true },
+            { 'header' => 'Host',                                 dataIndex => 'host_name',         hidden => Cpanel::JSON::XS::true },
             { 'header' => 'Host Icons',             width => 75,  dataIndex => 'icons',             align => 'right',  renderer => 'TP.render_host_service_icons' },
             { 'header' => 'Service',                width => 120, dataIndex => 'display_name',                         renderer => 'TP.render_clickable_service' },
-            { 'header' => 'Description',                          dataIndex => 'description',       hidden => JSON::XS::true },
+            { 'header' => 'Description',                          dataIndex => 'description',       hidden => Cpanel::JSON::XS::true },
             { 'header' => 'Icons',                  width => 75,  dataIndex => 'icons',             align => 'right',  renderer => 'TP.render_service_icons' },
             { 'header' => 'Status',                 width => 70,  dataIndex => 'state',             align => 'center', renderer => 'TP.render_service_status' },
             { 'header' => 'Last Check',             width => 80,  dataIndex => 'last_check',        align => 'center', renderer => 'TP.render_last_check' },
@@ -1707,56 +1680,56 @@ sub _task_services {
             { 'header' => 'Status Information',     flex  => 1,   dataIndex => 'plugin_output',                        renderer => 'TP.render_plugin_output' },
             { 'header' => 'Performance',            width => 80,  dataIndex => 'perf_data',                            renderer => 'TP.render_perfbar' },
 
-            { 'header' => 'Current Attempt',          dataIndex => 'current_attempt',             hidden => JSON::XS::true },
-            { 'header' => 'Max Check Attempts',       dataIndex => 'max_check_attempts',          hidden => JSON::XS::true },
-            { 'header' => 'Last State Change',        dataIndex => 'last_state_change',           hidden => JSON::XS::true, renderer => 'TP.render_date' },
-            { 'header' => 'Check Type',               dataIndex => 'check_type',                  hidden => JSON::XS::true, renderer => 'TP.render_check_type' },
-            { 'header' => 'Site ID',                  dataIndex => 'peer_key',                    hidden => JSON::XS::true },
-            { 'header' => 'Has Been Checked',         dataIndex => 'has_been_checked',            hidden => JSON::XS::true, renderer => 'TP.render_yes_no' },
-            { 'header' => 'Active Checks Enabled',    dataIndex => 'active_checks_enabled',       hidden => JSON::XS::true, renderer => 'TP.render_yes_no' },
-            { 'header' => 'Accept Passive Checks',    dataIndex => 'accept_passive_checks',       hidden => JSON::XS::true, renderer => 'TP.render_yes_no' },
-            { 'header' => 'Next Check',               dataIndex => 'next_check',                  hidden => JSON::XS::true, renderer => 'TP.render_date' },
-            { 'header' => 'Notification Number',      dataIndex => 'current_notification_number', hidden => JSON::XS::true },
-            { 'header' => 'First Notification Delay', dataIndex => 'first_notification_delay',    hidden => JSON::XS::true },
-            { 'header' => 'Notifications Enabled',    dataIndex => 'notifications_enabled',       hidden => JSON::XS::true, renderer => 'TP.render_enabled_switch' },
-            { 'header' => 'Is Flapping',              dataIndex => 'is_flapping',                 hidden => JSON::XS::true, renderer => 'TP.render_yes_no' },
-            { 'header' => 'Acknowledged',             dataIndex => 'acknowledged',                hidden => JSON::XS::true, renderer => 'TP.render_yes_no' },
-            { 'header' => 'Comments',                 dataIndex => 'comments',                    hidden => JSON::XS::true, hideable => JSON::XS::false },
-            { 'header' => 'Scheduled Downtime Depth', dataIndex => 'scheduled_downtime_depth',    hidden => JSON::XS::true },
-            { 'header' => 'Action Url',               dataIndex => 'action_url_expanded',         hidden => JSON::XS::true, renderer => 'TP.render_action_url' },
-            { 'header' => 'Notes url',                dataIndex => 'notes_url_expanded',          hidden => JSON::XS::true, renderer => 'TP.render_notes_url' },
-            { 'header' => 'Icon Image',               dataIndex => 'icon_image_expanded',         hidden => JSON::XS::true, renderer => 'TP.render_icon_url' },
-            { 'header' => 'Icon Image Alt',           dataIndex => 'icon_image_alt',              hidden => JSON::XS::true, hideable => JSON::XS::false },
-            { 'header' => 'Custom Variable Names',    dataIndex => 'custom_variable_names',       hidden => JSON::XS::true, hideable => JSON::XS::false },
-            { 'header' => 'Custom Variable Values',   dataIndex => 'custom_variable_values',      hidden => JSON::XS::true, hideable => JSON::XS::false },
-            { 'header' => 'Long Plugin Output',       dataIndex => 'long_plugin_output',          hidden => JSON::XS::true, renderer => 'TP.render_long_pluginoutput' },
+            { 'header' => 'Current Attempt',          dataIndex => 'current_attempt',             hidden => Cpanel::JSON::XS::true },
+            { 'header' => 'Max Check Attempts',       dataIndex => 'max_check_attempts',          hidden => Cpanel::JSON::XS::true },
+            { 'header' => 'Last State Change',        dataIndex => 'last_state_change',           hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_date' },
+            { 'header' => 'Check Type',               dataIndex => 'check_type',                  hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_check_type' },
+            { 'header' => 'Site ID',                  dataIndex => 'peer_key',                    hidden => Cpanel::JSON::XS::true },
+            { 'header' => 'Has Been Checked',         dataIndex => 'has_been_checked',            hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_yes_no' },
+            { 'header' => 'Active Checks Enabled',    dataIndex => 'active_checks_enabled',       hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_yes_no' },
+            { 'header' => 'Accept Passive Checks',    dataIndex => 'accept_passive_checks',       hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_yes_no' },
+            { 'header' => 'Next Check',               dataIndex => 'next_check',                  hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_date' },
+            { 'header' => 'Notification Number',      dataIndex => 'current_notification_number', hidden => Cpanel::JSON::XS::true },
+            { 'header' => 'First Notification Delay', dataIndex => 'first_notification_delay',    hidden => Cpanel::JSON::XS::true },
+            { 'header' => 'Notifications Enabled',    dataIndex => 'notifications_enabled',       hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_enabled_switch' },
+            { 'header' => 'Is Flapping',              dataIndex => 'is_flapping',                 hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_yes_no' },
+            { 'header' => 'Acknowledged',             dataIndex => 'acknowledged',                hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_yes_no' },
+            { 'header' => 'Comments',                 dataIndex => 'comments',                    hidden => Cpanel::JSON::XS::true, hideable => Cpanel::JSON::XS::false },
+            { 'header' => 'Scheduled Downtime Depth', dataIndex => 'scheduled_downtime_depth',    hidden => Cpanel::JSON::XS::true },
+            { 'header' => 'Action Url',               dataIndex => 'action_url_expanded',         hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_action_url' },
+            { 'header' => 'Notes url',                dataIndex => 'notes_url_expanded',          hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_notes_url' },
+            { 'header' => 'Icon Image',               dataIndex => 'icon_image_expanded',         hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_icon_url' },
+            { 'header' => 'Icon Image Alt',           dataIndex => 'icon_image_alt',              hidden => Cpanel::JSON::XS::true, hideable => Cpanel::JSON::XS::false },
+            { 'header' => 'Custom Variable Names',    dataIndex => 'custom_variable_names',       hidden => Cpanel::JSON::XS::true, hideable => Cpanel::JSON::XS::false },
+            { 'header' => 'Custom Variable Values',   dataIndex => 'custom_variable_values',      hidden => Cpanel::JSON::XS::true, hideable => Cpanel::JSON::XS::false },
+            { 'header' => 'Long Plugin Output',       dataIndex => 'long_plugin_output',          hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_long_pluginoutput' },
 
-            { 'header' => 'Host Parents',                   dataIndex => 'host_parents',                  hidden => JSON::XS::true, renderer => 'TP.render_clickable_host_list' },
-            { 'header' => 'Host Status',                    dataIndex => 'host_state',                    hidden => JSON::XS::true, renderer => 'TP.render_host_status' },
-            { 'header' => 'Host Notifications Enabled',     dataIndex => 'host_notifications_enabled',    hidden => JSON::XS::true, renderer => 'TP.render_enabled_switch' },
-            { 'header' => 'Host Check Type',                dataIndex => 'host_check_type',               hidden => JSON::XS::true, renderer => 'TP.render_check_type' },
-            { 'header' => 'Host Active Checks Enabled',     dataIndex => 'host_active_checks_enabled',    hidden => JSON::XS::true, renderer => 'TP.render_yes_no' },
-            { 'header' => 'Host Accept Passive Checks',     dataIndex => 'host_accept_passive_checks',    hidden => JSON::XS::true, renderer => 'TP.render_yes_no' },
-            { 'header' => 'Host Is Flapping',               dataIndex => 'host_is_flapping',              hidden => JSON::XS::true, renderer => 'TP.render_yes_no' },
-            { 'header' => 'Host Acknowledged',              dataIndex => 'host_acknowledged',             hidden => JSON::XS::true, renderer => 'TP.render_yes_no' },
-            { 'header' => 'Host Comments',                  dataIndex => 'host_comments',                 hidden => JSON::XS::true, hideable => JSON::XS::false },
-            { 'header' => 'Host Scheduled Downtime Depth',  dataIndex => 'host_scheduled_downtime_depth', hidden => JSON::XS::true },
-            { 'header' => 'Host Action Url',                dataIndex => 'host_action_url_expanded',      hidden => JSON::XS::true, renderer => 'TP.render_action_url' },
-            { 'header' => 'Host Notes Url',                 dataIndex => 'host_notes_url_expanded',       hidden => JSON::XS::true, renderer => 'TP.render_notes_url' },
-            { 'header' => 'Host Icon Image',                dataIndex => 'host_icon_image_expanded',      hidden => JSON::XS::true, renderer => 'TP.render_icon_url' },
-            { 'header' => 'Host Icon Image Alt',            dataIndex => 'host_icon_image_alt',           hidden => JSON::XS::true, hideable => JSON::XS::false },
-            { 'header' => 'Host Custom Variable Names',     dataIndex => 'host_custom_variable_names',    hidden => JSON::XS::true, hideable => JSON::XS::false },
-            { 'header' => 'Host Custom Variable Values',    dataIndex => 'host_custom_variable_values',   hidden => JSON::XS::true, hideable => JSON::XS::false },
+            { 'header' => 'Host Parents',                   dataIndex => 'host_parents',                  hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_clickable_host_list' },
+            { 'header' => 'Host Status',                    dataIndex => 'host_state',                    hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_host_status' },
+            { 'header' => 'Host Notifications Enabled',     dataIndex => 'host_notifications_enabled',    hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_enabled_switch' },
+            { 'header' => 'Host Check Type',                dataIndex => 'host_check_type',               hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_check_type' },
+            { 'header' => 'Host Active Checks Enabled',     dataIndex => 'host_active_checks_enabled',    hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_yes_no' },
+            { 'header' => 'Host Accept Passive Checks',     dataIndex => 'host_accept_passive_checks',    hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_yes_no' },
+            { 'header' => 'Host Is Flapping',               dataIndex => 'host_is_flapping',              hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_yes_no' },
+            { 'header' => 'Host Acknowledged',              dataIndex => 'host_acknowledged',             hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_yes_no' },
+            { 'header' => 'Host Comments',                  dataIndex => 'host_comments',                 hidden => Cpanel::JSON::XS::true, hideable => Cpanel::JSON::XS::false },
+            { 'header' => 'Host Scheduled Downtime Depth',  dataIndex => 'host_scheduled_downtime_depth', hidden => Cpanel::JSON::XS::true },
+            { 'header' => 'Host Action Url',                dataIndex => 'host_action_url_expanded',      hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_action_url' },
+            { 'header' => 'Host Notes Url',                 dataIndex => 'host_notes_url_expanded',       hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_notes_url' },
+            { 'header' => 'Host Icon Image',                dataIndex => 'host_icon_image_expanded',      hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_icon_url' },
+            { 'header' => 'Host Icon Image Alt',            dataIndex => 'host_icon_image_alt',           hidden => Cpanel::JSON::XS::true, hideable => Cpanel::JSON::XS::false },
+            { 'header' => 'Host Custom Variable Names',     dataIndex => 'host_custom_variable_names',    hidden => Cpanel::JSON::XS::true, hideable => Cpanel::JSON::XS::false },
+            { 'header' => 'Host Custom Variable Values',    dataIndex => 'host_custom_variable_values',   hidden => Cpanel::JSON::XS::true, hideable => Cpanel::JSON::XS::false },
 
-            { 'header' => 'Last Time Ok',       dataIndex => 'last_time_ok',       hidden => JSON::XS::true, renderer => 'TP.render_date' },
-            { 'header' => 'Last Time Warning',  dataIndex => 'last_time_warning',  hidden => JSON::XS::true, renderer => 'TP.render_date' },
-            { 'header' => 'Last Time Unknown',  dataIndex => 'last_time_unknown',  hidden => JSON::XS::true, renderer => 'TP.render_date' },
-            { 'header' => 'Last Time Critical', dataIndex => 'last_time_critical', hidden => JSON::XS::true, renderer => 'TP.render_date' },
+            { 'header' => 'Last Time Ok',       dataIndex => 'last_time_ok',       hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_date' },
+            { 'header' => 'Last Time Warning',  dataIndex => 'last_time_warning',  hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_date' },
+            { 'header' => 'Last Time Unknown',  dataIndex => 'last_time_unknown',  hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_date' },
+            { 'header' => 'Last Time Critical', dataIndex => 'last_time_critical', hidden => Cpanel::JSON::XS::true, renderer => 'TP.render_date' },
         ],
         data        => $c->stash->{'data'},
         totalCount  => $c->stash->{'pager'}->{'total_entries'},
         currentPage => $c->stash->{'pager'}->{'current_page'},
-        paging      => JSON::XS::true,
+        paging      => Cpanel::JSON::XS::true,
     };
 
     if($c->stash->{'escape_html_tags'} or $c->stash->{'show_long_plugin_output'} eq 'inline') {
@@ -1765,6 +1738,142 @@ sub _task_services {
             _long_plugin($s) if $c->stash->{'show_long_plugin_output'} eq 'inline';
         }
     }
+
+    _add_misc_details($c, undef, $json);
+    return $c->render(json => $json);
+}
+
+##########################################################
+sub _task_squares_data {
+    my($c) = @_;
+
+    my $source = $c->req->parameters->{'source'} || 'hosts';
+    my( $hostfilter, $servicefilter, $groupfilter ) = _do_filter($c);
+    return if $c->stash->{'has_error'};
+
+    my $now        = time();
+    my $data       = [];
+    if($source eq 'services' || $source eq 'both') {
+        my $services = $c->{'db'}->get_services(
+                                    filter  => [ Thruk::Utils::Auth::get_auth_filter($c, 'services'), $servicefilter],
+                                    columns => [qw/host_name description state acknowledged scheduled_downtime_depth has_been_checked last_state_change/],
+                                    sort    => { ASC => [ 'host_name',   'description' ] },
+                                );
+        for my $svc (@{$services}) {
+            push @{$data}, { uniq         => $svc->{'host_name'}.';'.$svc->{'description'},
+                             name         => $svc->{'host_name'}.' - '.$svc->{'description'},
+                             host_name    => $svc->{'host_name'},
+                             description  => $svc->{'description'},
+                             state        => $svc->{'has_been_checked'} == 0 ? 4 : $svc->{'state'},
+                             downtime     => $svc->{'scheduled_downtime_depth'},
+                             acknowledged => $svc->{'acknowledged'},
+                             link         => 'extinfo.cgi?type=2&host='.$svc->{'host_name'}."&service=".$svc->{'description'},
+                             duration     => $now - $svc->{'last_state_change'},
+                             isHost       => 0,
+                           };
+        }
+    }
+
+    if($source eq 'hosts' || $source eq 'both') {
+        my $hosts = $c->{'db'}->get_hosts(
+                                    filter  => [ Thruk::Utils::Auth::get_auth_filter($c, 'hosts'), $hostfilter],
+                                    columns => [qw/name state acknowledged scheduled_downtime_depth has_been_checked last_state_change/],
+                                    sort    => { ASC => [ 'name' ] },
+                                );
+        for my $hst (@{$hosts}) {
+            push @{$data}, { uniq         => $hst->{'name'},
+                             name         => $hst->{'name'},
+                             host_name    => $hst->{'name'},
+                             description  => '',
+                             state        => $hst->{'state'},
+                             downtime     => $hst->{'scheduled_downtime_depth'},
+                             acknowledged => $hst->{'acknowledged'},
+                             link         => 'extinfo.cgi?type=1&host='.$hst->{'name'},
+                             duration     => $now - $hst->{'last_state_change'},
+                             isHost       => 1,
+                            };
+        }
+    }
+
+    # need to sort by host/service again
+    if($source eq 'both') {
+        $data = Thruk::Backend::Manager::_sort({}, $data, 'uniq');
+    }
+
+    # apply group by
+    if($c->req->parameters->{'groupby'}) {
+        my $groupby = Thruk::Utils::list($c->req->parameters->{'groupby'});
+        if(scalar @{$groupby} == 2 && $groupby->[0] eq 'host_name' && $groupby->[1] eq 'description') {
+            # nothing todo
+        }
+        elsif(scalar @{$groupby} == 1 && $groupby->[0] eq 'host_name' && $source eq 'hosts') {
+            # nothing todo
+        } else {
+            my $grouped_data = {};
+            for my $d (@{$data}) {
+                my $uniq = [];
+                for my $key (@{$groupby}) {
+                    push @{$uniq}, $d->{$key};
+                }
+                $uniq = join(" - ", @{$uniq});
+                my $details = {
+                    'host_name'    => $d->{'host_name'},
+                    'description'  => $d->{'description'},
+                    'state'        => $d->{'state'},
+                    'duration'     => $d->{'duration'},
+                    'acknowledged' => $d->{'acknowledged'},
+                    'downtime'     => $d->{'downtime'},
+                    'isHost'       => $d->{'isHost'},
+                };
+                if(!$grouped_data->{$uniq}) {
+                    $grouped_data->{$uniq} = $d;
+                    $grouped_data->{$uniq}->{'uniq'}    = $uniq;
+                    $grouped_data->{$uniq}->{'name'}    = $uniq;
+                    $grouped_data->{$uniq}->{'details'} = [$details];
+                    delete $grouped_data->{$uniq}->{'link'};
+                } else {
+                    my $comb = $grouped_data->{$uniq};
+                    if($d->{'state'} > 0 && $d->{'state'} != 4) {
+                        my $worse = 0;
+                        if(!$d->{'acknowledged'} && $comb->{'acknowledged'}) {
+                            $worse = 1;
+                        }
+                        elsif(!$d->{'downtime'} && $comb->{'downtime'}) {
+                            $worse = 1;
+                        }
+                        elsif($d->{'isHost'} && !$comb->{'isHost'}) {
+                            $worse = 1;
+                        }
+                        elsif($comb->{'isHost'} && $comb->{'state'} != 0) {
+                            # host state beats every service
+                        }
+                        elsif($d->{'state'} > $comb->{'state'}) {
+                            $worse = 1;
+                        }
+                        if($worse) {
+                            $comb->{'state'}        = $d->{'state'};
+                            $comb->{'isHost'}       = $d->{'isHost'};
+                            $comb->{'downtime'}     = $d->{'downtime'};
+                            $comb->{'acknowledged'} = $d->{'acknowledged'};
+                            $comb->{'duration'}     = $d->{'duration'};
+                        }
+                    }
+                    if($comb->{'duration'} > $d->{'duration'} && $comb->{'state'} == $d->{'state'} && $comb->{'isHost'} == $d->{'isHost'}) {
+                        $comb->{'duration'} = $d->{'duration'};
+                    }
+                    push @{$grouped_data->{$uniq}->{'details'}}, $details;
+                }
+            }
+            $data = [];
+            for my $key (sort keys %{$grouped_data}) {
+                push @{$data}, $grouped_data->{$key};
+            }
+        }
+    }
+
+    my $json = {
+        data => $data,
+    };
 
     _add_misc_details($c, undef, $json);
     return $c->render(json => $json);
@@ -1923,7 +2032,13 @@ sub _task_servicesminemap {
     my $service2index = {};
     my $json = {
         columns => [
-            { 'header' => '<div class="minemap_first_col" style="top: '.($height/2-10).'px;">Hostname</div>', width => 120, height => $height, dataIndex => 'host_display_name' },
+            { 'header'       => '<div class="minemap_first_col" style="top: '.($height/2-10).'px;">Hostname</div>',
+              'headerIE'     => '<div class="minemap_first_col" style="top: '.($height-25).'px;">Hostname</div>',
+              'headerChrome' => '<div class="minemap_first_col" style="bottom: 0px;">Hostname</div>',
+              'width'        => 120,
+              'height'       => $height,
+              'dataIndex'    => 'host_display_name',
+            },
         ],
         data        => [],
     };
@@ -1933,13 +2048,14 @@ sub _task_servicesminemap {
         my $index = 'col'.$x;
         $service2index->{$svc} = $index;
         push @{$json->{'columns'}}, {
-                    'header'    => '<div class="vertical" style="top: '.($height/2-10).'px;">'.$svc.'</div>',
-                    'headerIE'  => '<div class="vertical" style="top: 8px; width: '.($height-20).'px;">'.$svc.'</div>',
-                    'width'     => 20,
-                    'height'    => $height,
-                    'dataIndex' => $index,
-                    'align'     => 'center',
-                    'tdCls'     => 'mine_map_cell',
+                    'header'       => '<div class="vertical" style="top: '.($height/2-10).'px;">'.$svc.'</div>',
+                    'headerIE'     => '<div class="vertical" style="top: 8px; width: '.($height-25).'px; right: '.($height/2-16).'px;">'.$svc.'</div>',
+                    'headerChrome' => '<div class="vertical" style="top: '.($height-20).'px;">'.$svc.'</div>',
+                    'width'        => 20,
+                    'height'       => $height,
+                    'dataIndex'    => $index,
+                    'align'        => 'center',
+                    'tdCls'        => 'mine_map_cell',
         };
         $x++;
     }
@@ -1947,7 +2063,7 @@ sub _task_servicesminemap {
         my $hst  = $hosts->{$name};
         my $data;
         if ($hst->{'host_action_url_expanded'}) {
-            $data = { 'host_display_name' => $hst->{'host_display_name'} . '&nbsp;<a target="_blank" href="'.$hst->{'host_action_url_expanded'}.'"><img src="'.$c->stash->{'url_prefix'}.'themes/'.$c->stash->{'theme'}.'/images/'.$c->stash->{'host_action_icon'}.'" border="0" width="20" height="20" alt="Perform Extra Host Actions" title="Perform Extra Host Actions" style="vertical-align: text-bottom;"></a>' };
+            $data = { 'host_display_name' => $hst->{'host_display_name'} . '&nbsp;<a target="_blank" href="'.$hst->{'host_action_url_expanded'}.'" style="position: relative;"><img src="'.$c->stash->{'url_prefix'}.'themes/'.$c->stash->{'theme'}.'/images/'.$c->stash->{'host_action_icon'}.'" border="0" width="20" height="20" alt="Perform Extra Host Actions" title="Perform Extra Host Actions" style="vertical-align: text-bottom; position: absolute; top: -2px;"></a>' };
         } else {
             $data = { 'host_display_name' => $hst->{'host_display_name'} };
         }
@@ -2003,13 +2119,13 @@ sub _task_pnp_graphs {
         }
     }
     $graphs = Thruk::Backend::Manager::_sort({}, $graphs, 'text');
-    $c->{'db'}->_page_data($c, $graphs);
+    Thruk::Backend::Manager::page_data($c, $graphs);
 
     my $json = {
         data        => $c->stash->{'data'},
         total       => $c->stash->{'pager'}->{'total_entries'},
         currentPage => $c->stash->{'pager'}->{'current_page'},
-        paging      => JSON::XS::true,
+        paging      => Cpanel::JSON::XS::true,
     };
 
     return $c->render(json => $json);
@@ -2051,13 +2167,13 @@ sub _task_grafana_graphs {
         }
     }
     $graphs = Thruk::Backend::Manager::_sort({}, $graphs, 'text');
-    $c->{'db'}->_page_data($c, $graphs);
+    Thruk::Backend::Manager::page_data($c, $graphs);
 
     my $json = {
         data        => $c->stash->{'data'},
         total       => $c->stash->{'pager'}->{'total_entries'},
         currentPage => $c->stash->{'pager'}->{'current_page'},
-        paging      => JSON::XS::true,
+        paging      => Cpanel::JSON::XS::true,
     };
 
     return $c->render(json => $json);
@@ -2088,12 +2204,12 @@ sub _task_userdata_backgroundimages {
         unshift @{$images}, { path => $c->stash->{'url_prefix'}.'plugins/panorama/images/s2.gif', image => '&lt;upload new image&gt;'};
         unshift @{$images}, { path => $c->stash->{'url_prefix'}.'plugins/panorama/images/s.gif',  image => 'none'};
     }
-    $c->{'db'}->_page_data($c, $images);
+    Thruk::Backend::Manager::page_data($c, $images);
     my $json = {
         data        => $c->stash->{'data'},
         total       => $c->stash->{'pager'}->{'total_entries'},
         currentPage => $c->stash->{'pager'}->{'current_page'},
-        paging      => JSON::XS::true,
+        paging      => Cpanel::JSON::XS::true,
     };
     return $c->render(json => $json);
 }
@@ -2122,12 +2238,12 @@ sub _task_userdata_images {
     if(!$query) {
         unshift @{$images}, { path => $c->stash->{'url_prefix'}.'plugins/panorama/images/s2.gif', image => '&lt;upload new image&gt;'};
     }
-    $c->{'db'}->_page_data($c, $images);
+    Thruk::Backend::Manager::page_data($c, $images);
     my $json = {
         data        => $c->stash->{'data'},
         total       => $c->stash->{'pager'}->{'total_entries'},
         currentPage => $c->stash->{'pager'}->{'current_page'},
-        paging      => JSON::XS::true,
+        paging      => Cpanel::JSON::XS::true,
     };
     return $c->render(json => $json);
 }
@@ -2366,7 +2482,10 @@ sub _task_dashboard_data {
     }
     my $json;
     if(!$dashboard) {
-        Thruk::Utils::set_message( $c, { style => 'fail_message', msg => 'no such dashboard', code => 404 });
+        if(!$c->req->parameters->{'hidden'}) {
+            Thruk::Utils::set_message( $c, { style => 'fail_message', msg => 'no such dashboard' });
+        }
+        $c->res->code(404);
         $json = { 'status' => 'failed' };
     } else {
         my $data = {};
@@ -2409,14 +2528,14 @@ sub _task_dashboard_list {
 
     my $json = {
         columns => [
-            { 'header' => 'Id',                        dataIndex => 'id',                              hidden => JSON::XS::true },
-            { 'header' => 'Nr',                        dataIndex => 'nr',                              hidden => JSON::XS::true },
+            { 'header' => 'Id',                        dataIndex => 'id',                              hidden => Cpanel::JSON::XS::true },
+            { 'header' => 'Nr',                        dataIndex => 'nr',                              hidden => Cpanel::JSON::XS::true },
             { 'header' => '',            width => 20,  dataIndex => 'visible',      align => 'left', tdCls => 'icon_column', renderer => 'TP.render_dashboard_toggle_visible' },
             { 'header' => 'Name',        width => 120, dataIndex => 'name',         align => 'left', editor => {}, tdCls => 'editable'   },
             { 'header' => 'Description', flex  => 1,   dataIndex => 'description',  align => 'left', editor => {}, tdCls => 'editable'   },
             { 'header' => 'Owner',        width => 120, dataIndex => 'user',        align => 'center',
                                          editor => $c->stash->{'is_admin'} ? {} : undef,
-                                         hidden => $type eq 'my' ? JSON::XS::true : JSON::XS::false,
+                                         hidden => $type eq 'my' ? Cpanel::JSON::XS::true : Cpanel::JSON::XS::false,
                                          tdCls => $c->stash->{'is_admin'} ? 'editable' : '',
             },
             { 'header' => 'Read-Write Groups',  width => 120, dataIndex => 'groups_rw',    align => 'left' },
@@ -3001,11 +3120,8 @@ sub _get_default_tab_xdata {
 ##########################################################
 sub _add_json_dashboard_timestamps {
     my($c, $json, $tab) = @_;
-    if(!defined $tab) {
-        my $data = Thruk::Utils::get_user_data($c);
-        if($data && $data->{'panorama'} && $data->{'panorama'}->{'dashboards'} && $data->{'panorama'}->{'dashboards'}->{'tabpan'} && $data->{'panorama'}->{'dashboards'}->{'tabpan'}->{'activeTab'}) {
-            $tab = $data->{'panorama'}->{'dashboards'}->{'tabpan'}->{'activeTab'};
-        }
+    if(!defined $tab && $c->cookie('thruk_panorama_active')) {
+        $tab = $c->cookie('thruk_panorama_active')->value;
     }
     if($tab) {
         my $nr = $tab;
@@ -3047,6 +3163,7 @@ sub _add_misc_details {
         $json->{'server_version'}       = $c->config->{'version'};
         $json->{'server_version'}      .= '~'.$c->config->{'branch'} if $c->config->{'branch'};
         $json->{'server_extra_version'} = $c->config->{'extra_version'};
+        $json->{'broadcasts'}           = Thruk::Utils::Broadcast::get_broadcasts($c, undef, undef, 1);
         $c->stats->profile(end => "_add_misc_details");
     }
     elsif($c->req->parameters->{'current_tab'}) {

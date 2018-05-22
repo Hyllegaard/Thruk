@@ -185,8 +185,10 @@ TP.iconShowEditDialog = function(panel) {
                     fieldLabel: 'Position',
                     xtype:      'fieldcontainer',
                     layout:     'table',
-                    items: [{ xtype: 'label', text:  'x:', style: 'margin-left: 0; margin-right: 2px;' },
-                            { xtype: 'numberfield', name:  'x', width: 55, value: panel.xdata.layout.x, listeners: {
+                    id:         'layoutFormPosition',
+                    disabled:   (panel.xdata.appearance.type == 'connector'),
+                    items: [{ xtype: 'label', text:  'x:', style: 'margin-left: 0; margin-right: 2px;', hidden: !!tab.map },
+                            { xtype: 'numberfield', name:  'x', width: 70, value: panel.xdata.layout.x, hidden: !!tab.map, listeners: {
                                 change: function(This, newValue, oldValue, eOpts) {
                                     if(!panel.noMoreMoves) {
                                         panel.noMoreMoves = true;
@@ -196,8 +198,8 @@ TP.iconShowEditDialog = function(panel) {
                                     }
                                 }
                             }},
-                            { xtype: 'label', text:  'y:', style: 'margin-left: 10px; margin-right: 2px;' },
-                            { xtype: 'numberfield', name:  'y', width: 55, value: panel.xdata.layout.y, listeners: {
+                            { xtype: 'label', text:  'y:', style: 'margin-left: 10px; margin-right: 2px;', hidden: !!tab.map },
+                            { xtype: 'numberfield', name:  'y', width: 70, value: panel.xdata.layout.y, hidden: !!tab.map, listeners: {
                                 change: function(This, newValue, oldValue, eOpts) {
                                     if(!panel.noMoreMoves) {
                                         panel.noMoreMoves = true;
@@ -207,7 +209,32 @@ TP.iconShowEditDialog = function(panel) {
                                     }
                                 }
                             }},
-                            { xtype: 'label', text: '(use cursor keys)', style: 'margin-left: 10px;', cls: 'form-hint' }
+
+                            { xtype: 'label', text:  'lat:', style: 'margin-left: 0px; margin-right: 2px;', hidden: !tab.map },
+                            { xtype: 'numberfield', name:  'lat', width: 140, decimalPrecision: 14, value: panel.xdata.layout.lat, hidden: !tab.map, listeners: {
+                                change: function(This, newValue, oldValue, eOpts) {
+                                    if(!panel.noMoreMoves) {
+                                        panel.noMoreMoves = true;
+                                        var lon = Number(This.up('panel').getValues().lon);
+                                        panel.moveToMapLonLat(undefined, false, {layout:{lon: lon, lat: newValue}, appearance:{}});
+                                        panel.noMoreMoves = false;
+                                    }
+                                }
+                            }},
+
+                            { xtype: 'label', text:  'lon:', style: 'margin-left: 10px; margin-right: 2px;', hidden: !tab.map },
+                            { xtype: 'numberfield', name:  'lon', width: 140, decimalPrecision: 14, value: panel.xdata.label.lon, hidden: !tab.map, listeners: {
+                                change: function(This, newValue, oldValue, eOpts) {
+                                    if(!panel.noMoreMoves) {
+                                        panel.noMoreMoves = true;
+                                        var lat = Number(This.up('panel').getValues().lat);
+                                        panel.moveToMapLonLat(undefined, false, {layout:{lon: newValue, lat: lat}, appearance:{}});
+                                        panel.noMoreMoves = false;
+                                    }
+                                }
+                            }},
+
+                            { xtype: 'label', text: '(use cursor keys)', style: 'margin-left: 10px;', cls: 'form-hint', hidden: !!tab.map }
                     ]
                 }, {
                     fieldLabel:   'Rotation',
@@ -245,21 +272,63 @@ TP.iconShowEditDialog = function(panel) {
                     listeners:   { change: function(This) { var xdata = TP.get_icon_form_xdata(settingsWindow); panel.applyScale(This.value, xdata); } },
                     disabled:     (panel.hasScale || panel.xdata.appearance.type == 'icon') ? false : true,
                     hidden:        panel.iconType == 'text' ? true : false
+                }, {
+                    fieldLabel:   'Size',
+                    id:           'layoutsize',
+                    xtype:        'fieldcontainer',
+                    layout:       'hbox',
+                    defaults:      {
+                        listeners:   { change: function(This) { var xdata = TP.get_icon_form_xdata(settingsWindow); panel.applyScale(This.value, xdata); } }
+                    },
+                    hidden:        panel.iconType == 'text' ? true : false,
+                    items: [
+                        { xtype: 'label', text:  'x:', style: 'margin-left: 0px; margin-right: 2px; margin-top: 2px;' },
+                        {
+                            xtype:        'numberunit',
+                            unit:         'px',
+                            allowDecimals: true,
+                            name:         'size_x',
+                            minValue:        0,
+                            step:           10,
+                            width:          70,
+                            value:         panel.xdata.layout.size_x,
+                            disabled:     (panel.hasScale || panel.xdata.appearance.type == 'icon') ? false : true
+                        },
+                        { xtype: 'label', text:  'y:', style: 'margin-left: 10px; margin-right: 2px; margin-top: 2px;' },
+                        {
+                            xtype:        'numberunit',
+                            unit:         'px',
+                            allowDecimals: true,
+                            name:         'size_y',
+                            minValue:        0,
+                            step:           10,
+                            width:          70,
+                            value:         panel.xdata.layout.size_y,
+                            disabled:     (panel.hasScale || panel.xdata.appearance.type == 'icon') ? false : true
+                        },
+                        { xtype: 'label', text: '(either use Scale or Size)', style: 'margin-left: 10px; margin-top: 4px;', cls: 'form-hint' }
+                    ]
                 }]
             }]
         }]
     };
 
-    TP.shapesStore.load();
+    if(panel.xdata.appearance.type == 'shape') {
+        TP.shapesStore.load();
+    }
     var renderUpdateDo = function(forceColor, forceRenderItem) {
         if(TP.skipRender) { return; }
         var xdata = TP.get_icon_form_xdata(settingsWindow);
+        if(panel.lastState != undefined) { xdata.state = panel.lastState; }
         if(panel.iconType == 'image') { panel.setRenderItem(xdata); }
         if(xdata.appearance      == undefined) { return; }
         if(xdata.appearance.type == undefined) { return; }
         if(xdata.appearance.type == 'shape') { forceRenderItem = true; }
         if(xdata.appearance.type != lastType || forceRenderItem) {
             if(panel.setRenderItem) { panel.setRenderItem(xdata, forceRenderItem, forceColor); }
+            if(xdata.appearance.type == 'shape') {
+                TP.shapesStore.load();
+            }
         }
         lastType = xdata.appearance.type;
 
@@ -313,8 +382,15 @@ TP.iconShowEditDialog = function(panel) {
                 });
                 if(newValue == 'icon' || panel.hasScale) {
                     Ext.getCmp('layoutscale').setDisabled(false);
+                    Ext.getCmp('layoutsize').setDisabled(false);
                 } else {
                     Ext.getCmp('layoutscale').setDisabled(true);
+                    Ext.getCmp('layoutsize').setDisabled(true);
+                }
+                if(newValue == 'connector') {
+                    Ext.getCmp('layoutFormPosition').setDisabled(true);
+                } else {
+                    Ext.getCmp('layoutFormPosition').setDisabled(false);
                 }
 
                 panel.appearance = Ext.create('tp.icon.appearance.'+newValue, { panel: panel });
@@ -688,6 +764,58 @@ TP.iconShowEditDialog = function(panel) {
                     submitEmptyText: false,
                     defaults:      { anchor: '-12', labelWidth: 50 },
                     items: [{
+                        xtype:        'fieldcontainer',
+                        fieldLabel:   'Position',
+                        layout:      { type: 'hbox', align: 'stretch' },
+                        items:        [{
+                            xtype:          'combobox',
+                            name:           'popup_position',
+                            value:          'automatic',
+                            store:         ['automatic', 'absolute position', 'relative position'],
+                            flex:            1,
+                            editable:        false,
+                            listeners:     {
+                                change: function(This, newValue, oldValue, eOpts) {
+                                    var defaults = TP.getPanelDetailsHeader(panel, true);
+                                    if(newValue == 'automatic') {
+                                        Ext.getCmp('popup_x').setDisabled(true);
+                                        Ext.getCmp('popup_y').setDisabled(true);
+                                    }
+                                    else {
+                                        Ext.getCmp('popup_x').setDisabled(false);
+                                        Ext.getCmp('popup_y').setDisabled(false);
+                                    }
+                                    TP.iconSettingsGlobals.popupPreviewUpdate();
+                                }
+                            }
+                        }, {
+                            xtype:        'label',
+                            text:         'x',
+                            margins:      {top: 3, right: 2, bottom: 0, left: 7}
+                        }, {
+                            xtype:        'numberunit',
+                            allowDecimals: false,
+                            id:           'popup_x',
+                            name:         'popup_x',
+                            width:         60,
+                            unit:         'px',
+                            disabled:      true,
+                            listeners:   { change: function() { TP.iconSettingsGlobals.popupPreviewUpdate() } }
+                        }, {
+                            xtype:        'label',
+                            text:         'y',
+                            margins:      {top: 3, right: 2, bottom: 0, left: 7}
+                        }, {
+                            xtype:        'numberunit',
+                            allowDecimals: false,
+                            name:         'popup_y',
+                            id:           'popup_y',
+                            width:         60,
+                            unit:         'px',
+                            disabled:      true,
+                            listeners:   { change: function() { TP.iconSettingsGlobals.popupPreviewUpdate() } }
+                        }]
+                    },{
                         fieldLabel:     'Popup',
                         xtype:          'combobox',
                         name:           'type',
@@ -767,6 +895,105 @@ TP.iconShowEditDialog = function(panel) {
         };
     }
 
+    /* permissions Tab */
+    var access = [];
+    if(panel.xdata.groups == undefined) { panel.xdata.groups = []; }
+    Ext.Array.each(panel.xdata.groups, function(item, idx, len) {
+        var group = Ext.Object.getKeys(item)[0];
+        var perm  = item[group];
+        access.push({ contactgroup: group, permission: perm });
+    });
+    var permissionsStore = Ext.create('Ext.data.Store', {
+        fields: ['contactgroup', 'permission'],
+        data: access
+    });
+    var permissionsItems = [,{
+            xtype: 'label',
+            text:  'Hide/show this icon for specific contactgroups',
+            style: "margin-left: 26%;"
+        },{
+            xtype:      'gridpanel',
+            name:       'permissions',
+            id:         'permissionsGrid',
+            columns:    [
+                    { header: 'Group', flex: 1, dataIndex: 'contactgroup',  align: 'left', tdCls: 'editable', editor: {
+                            xtype:            'searchCbo',
+                            panel:             panel,
+                            store:             searchStore,
+                            storeExtraParams: { wildcards: 1 },
+                            lazyRender:        true,
+                            allowBlank:        false
+                        }
+                    },
+                    { header: 'Permission', width: 140,  dataIndex: 'permission', align: 'left', tdCls: 'editable', editor: {
+                            xtype:         'combobox',
+                            triggerAction: 'all',
+                            selectOnTab:    true,
+                            lazyRender:     true,
+                            editable:       false,
+                            store:        ['show', 'hide']
+                        }
+                    },
+                    { header: '',  width: 30,
+                      xtype: 'actioncolumn',
+                      items: [{
+                            icon: '../plugins/panorama/images/delete.png',
+                            handler: TP.removeGridRow,
+                            action: 'remove'
+                      }],
+                      tdCls: 'clickable icon_column'
+                    }
+            ],
+            store: permissionsStore,
+            selType:    'rowmodel',
+            viewConfig: {
+                plugins: {
+                    ptype: 'gridviewdragdrop',
+                    dragText: 'Drag and drop to reorganize'
+                }
+            },
+            plugins:     [Ext.create('Ext.grid.plugin.RowEditing', {
+                clicksToEdit: 1
+            })],
+            height: 230,
+            width:  300,
+            fbar: [{
+                type: 'button',
+                text: 'Add Contactgroup',
+                iconCls: 'user-tab',
+                handler: function(btn, eOpts) {
+                    var store = btn.up('gridpanel').store;
+                    store.add({contactgroup:'*', permission:'hide'})
+                    btn.up('gridpanel').plugins[0].startEdit(store.last(), 0);
+                }
+            }]
+        },{
+            xtype: 'label',
+            text:  'Hint: order from top to bottom, first match wins',
+            cls:   'form-hint',
+            style: "margin-left: 30%;"
+        }
+    ];
+    var permissionsTab = {
+        title : 'Permissions',
+        type  : 'panel',
+        items: [{
+            xtype : 'panel',
+            layout: 'fit',
+            border: 0,
+            items: [{
+                    xtype:          'form',
+                    id:             'permissionForm',
+                    bodyPadding:     2,
+                    border:          0,
+                    bodyStyle:      'overflow-y: auto;',
+                    submitEmptyText: false,
+                    defaults:      { anchor: '-12', labelWidth: 130 },
+                    items:           permissionsItems
+            }]
+        }]
+    };
+
     /* Source Tab */
     var sourceTab = {
         title: 'Source',
@@ -841,6 +1068,7 @@ TP.iconShowEditDialog = function(panel) {
             linkTab,
             labelTab,
             popupTab,
+            permissionsTab,
             sourceTab
         ]
     });
@@ -854,7 +1082,7 @@ TP.iconShowEditDialog = function(panel) {
 
     var settingsWindow = new Ext.Window({
         height:  350,
-        width:   450,
+        width:   540,
         layout: 'fit',
         hidden:  true,
         items:   tabPanel,
@@ -884,8 +1112,8 @@ TP.iconShowEditDialog = function(panel) {
                     if(panel.classChanged) {
                         panel.xdata.cls = panel.classChanged;
                     }
-                    panel.forceSaveState();
                     delete TP.iconSettingsWindow;
+                    panel.forceSaveState();
                     settingsWindow.destroy();
                     panel.firstRun = false;
                     panel.applyXdata();
@@ -897,7 +1125,7 @@ TP.iconShowEditDialog = function(panel) {
         ],
         listeners: {
             afterRender: function (This) {
-                var form = This.items.getAt(0).items.getAt(1).down('form').getForm();
+                var form = Ext.getCmp('layoutForm').getForm();
                 this.nav = Ext.create('Ext.util.KeyNav', this.el, {
                     'left':  function(evt){ form.setValues({x: Number(form.getValues().x)-1}); },
                     'right': function(evt){ form.setValues({x: Number(form.getValues().x)+1}); },
@@ -920,14 +1148,8 @@ TP.iconShowEditDialog = function(panel) {
                     if(panel.firstRun) {
                         panel.destroy();
                     } else {
-                        if(panel.classChanged) {
-                            var key = panel.id;
-                            panel.redrawOnly = true;
-                            panel.destroy();
-                            TP.timeouts['timeout_' + key + '_show_settings'] = window.setTimeout(function() {
-                                panel = TP.add_panlet({id:key, skip_state:true, tb:tab, autoshow:true}, false);
-                                TP.updateAllIcons(Ext.getCmp(panel.panel_id), panel.id);
-                            }, 50);
+                        if(panel.classChanged || panel.xdata.appearance.type == "connector") {
+                            panel.redraw();
                             return;
                         } else {
                             // restore position and layout
@@ -954,6 +1176,7 @@ TP.iconShowEditDialog = function(panel) {
         }
     }).show();
     Ext.getBody().unmask();
+    settingsWindow.permissionsStore = permissionsStore;
 
     TP.setIconSettingsValues(panel.xdata);
     TP.iconSettingsWindow = settingsWindow;
@@ -964,10 +1187,14 @@ TP.iconShowEditDialog = function(panel) {
     };
     TP.iconSettingsGlobals.stateUpdate = function() {
         var xdata = TP.get_icon_form_xdata(settingsWindow);
-        TP.updateAllIcons(Ext.getCmp(panel.panel_id), panel.id, xdata);
-        labelUpdate();
-        // update performance data stores
-        TP.iconSettingsGlobals.perfDataUpdate();
+        TP.updateAllIcons(Ext.getCmp(panel.panel_id), panel.id, xdata, undefined, function() {
+            if(!TP.iconSettingsWindow) { return; } // closed meanwhile
+            panel.refreshHandler(panel.lastState); // recalculate state
+            TP.iconSettingsGlobals.renderUpdate();
+            labelUpdate();
+            // update performance data stores
+            TP.iconSettingsGlobals.perfDataUpdate();
+        });
     }
 
     TP.iconSettingsGlobals.popupPreviewUpdate = function() {
@@ -986,7 +1213,7 @@ TP.iconShowEditDialog = function(panel) {
             panel.locked = false;
             TP.suppressIconTip = true;
 
-             TP.iconTip.alignToSettingsWindow();
+            TP.iconTip.alignToSettingsWindow();
         }, 100);
     }
 
@@ -1037,10 +1264,18 @@ TP.get_icon_form_xdata = function(settingsWindow) {
         label:      Ext.getCmp('labelForm').getForm().getValues(),
         popup:      Ext.getCmp('popupForm') && Ext.getCmp('popupForm').getForm().getValues()
     }
+    xdata.groups = [];
+    TP.iconSettingsWindow.permissionsStore.each(function(rec) {
+        var row = {};
+        row[rec.data.contactgroup] = rec.data.permission;
+        xdata.groups.push(row);
+    });
+    if(xdata.groups.length == 0) { delete xdata.groups }
+
     // clean up
     if(xdata.label.labeltext == '')   { delete xdata.label; }
     if(xdata.link.link == '')         { delete xdata.link;  }
-    if(xdata.popup && xdata.popup.type == 'default') { delete xdata.popup; }
+    if(xdata.popup && xdata.popup.type == 'default' && xdata.popup.popup_position == 'automatic') { delete xdata.popup; }
     if(xdata.layout.rotation == 0)  { delete xdata.layout.rotation; }
     Ext.getCmp('appearance_types').store.each(function(data, i) {
         var t = data.data.value;
@@ -1053,6 +1288,17 @@ TP.get_icon_form_xdata = function(settingsWindow) {
             }
         }
     });
+    if(xdata.appearance.type == "connector") {
+        xdata.layout.lon1 = xdata.appearance.lon1;
+        xdata.layout.lat1 = xdata.appearance.lat1;
+        xdata.layout.lon2 = xdata.appearance.lon2;
+        xdata.layout.lat2 = xdata.appearance.lat2;
+    }
+    delete xdata.appearance.lon1;
+    delete xdata.appearance.lat1;
+    delete xdata.appearance.lon2;
+    delete xdata.appearance.lat2;
+
     if(settingsWindow.panel.hideAppearanceTab)  { delete xdata.appearance; }
     if(settingsWindow.panel.iconType == 'text') { delete xdata.general;    }
     if(xdata.appearance) {
@@ -1061,6 +1307,9 @@ TP.get_icon_form_xdata = function(settingsWindow) {
     }
     if(xdata.general) {
         delete xdata.general.newcls;
+        if(xdata.general.backends && xdata.general.backends.length == 1 && xdata.general.backends[0] == '') {
+            delete xdata.general.backends;
+        }
     }
     return(xdata);
 }
@@ -1223,6 +1472,13 @@ TP.iconLabelHelp = function(panel, textarea_id, extra) {
                     +'<tr><td><\/td><td><i>{{ sprintf("%.2f", availability({d: "31d"})) }}%<\/i><\/td><td>availability for the last 31 days<\/td><\/tr>'
                     +'<tr><td><\/td><td colspan=2><i>{{ sprintf("%.2f", availability({d: "24h", tm: "5x8"})) }}%<\/i><\/td><\/tr>'
                     +'<tr><td><\/td><td><\/td><td>availability for the last 24 hours within given timeperiod<\/td><\/tr>'
+                    +'<tr><td><\/td><td colspan=2><i>{{ sprintf("%.2f", availability({d: "24h", s: "cu"})) }}%<\/i><\/td><\/tr>'
+                    +'<tr><td><\/td><td colspan=2>service availablility with only critical and unknown assumed as unavailable<\/td><\/tr>'
+                    +'<tr><td><\/td><td colspan=2>avail. options are: d: &lt;duration&gt;, tm: &lt;timeperiod&gt;, s: &lt;servicesstates&gt;, h: &lt;hoststates&gt;, downtime: false<\/td><\/tr>'
+                    +'<tr><td><\/td><td colspan=2>host states are d (down), u (unreachable)<\/td><\/tr>'
+                    +'<tr><td><\/td><td colspan=2>service states are w (warning), c (critical) and u (unknown)<\/td><\/tr>'
+                    +'<tr><td><\/td><td colspan=2>downtimes are assumed to be available unless downtime: false is set<\/td><\/tr>'
+                    +'<tr><td><\/td><td colspan=2><i>{{ sprintf("%.2f", availability({d: "24h", tm: "5x8", s: "cu", downtime: false})) }}%<\/i><\/td><\/tr>'
                     +extra_items
 
                     +'<\/table>',

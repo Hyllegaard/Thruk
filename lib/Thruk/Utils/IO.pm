@@ -12,9 +12,9 @@ IO Utilities Collection for Thruk
 
 use strict;
 use warnings;
-use Carp qw/confess/;
+use Carp qw/confess longmess/;
 use Fcntl qw/:mode :flock/;
-use JSON::XS ();
+use Cpanel::JSON::XS ();
 use POSIX ":sys_wait_h";
 use IPC::Open3 qw/open3/;
 use File::Slurp qw/read_file/;
@@ -35,7 +35,8 @@ close filehandle and ensure permissions and ownership
 =cut
 sub close {
     my($fh, $filename, $just_close) = @_;
-    my $rc = CORE::close($fh) or confess("cannot write to $filename: $!");
+    my $rc = CORE::close($fh);
+    confess("cannot write to $filename: $!") unless $rc;
     ensure_permissions('file', $filename) unless $just_close;
     return $rc;
 }
@@ -72,12 +73,13 @@ create folder recursive
 
 sub mkdir_r {
     for my $dirname (@_) {
-        next if -d $dirname;
+        $dirname =~ s|\/\.?$||gmx;
+        next if -d $dirname.'/.';
         my $path = '';
         for my $part (split/(\/)/mx, $dirname) {
             $path .= $part;
             next if $path eq '';
-            Thruk::Utils::IO::mkdir($path) unless -d $path;
+            Thruk::Utils::IO::mkdir($path) unless -d $path.'/.';
         }
     }
     return 1;
@@ -186,7 +188,7 @@ stores data json encoded
 sub json_lock_store {
     my($file, $data, $pretty, $changed_only, $tmpfile) = @_;
 
-    my $json = JSON::XS->new->utf8;
+    my $json = Cpanel::JSON::XS->new->utf8;
     $json = $json->pretty if $pretty;
     $json = $json->canonical; # keys will be randomly ordered otherwise
 
@@ -223,7 +225,9 @@ retrieve json data
 sub json_lock_retrieve {
     my($file) = @_;
 
-    my $json = JSON::XS->new->utf8;
+    return unless -s $file;
+
+    my $json = Cpanel::JSON::XS->new->utf8;
     $json->relaxed();
     local $/=undef;
 
@@ -264,7 +268,7 @@ sub save_logs_to_tempfile {
     for my $r (@{$data}) {
         print $fh Encode::encode_utf8($r->{'message'}),"\n";
     }
-    &close($fh, $filename) or die("cannot close file ".$filename.": ".$!);
+    &close($fh, $filename);
     return($filename);
 }
 
@@ -272,23 +276,44 @@ sub save_logs_to_tempfile {
 
 =head2 cmd
 
-  cmd($c, $command [, $stdin])
+  cmd($c, $command [, $stdin] [, $print_prefix] [, $detached])
 
 run command and return exit code and output
 
 $command can be either a string like '/bin/prog arg1 arg2' or an
 array like ['/bin/prog', 'arg1', 'arg2']
 
+optional print_prefix will print the result on the fly with given prefix.
+
+optional detached will run the command detached in the background
+
 =cut
 
 sub cmd {
-    my($c, $cmd, $stdin) = @_;
+    my($c, $cmd, $stdin, $print_prefix, $detached) = @_;
 
     local $SIG{CHLD} = '';
     local $SIG{PIPE} = 'DEFAULT';
     local $SIG{INT}  = 'DEFAULT';
     local $SIG{TERM} = 'DEFAULT';
-    local $ENV{REMOTE_USER}=$c->stash->{'remote_user'} if $c;
+    local $ENV{REMOTE_USER} = $c->stash->{'remote_user'} if $c;
+    my $groups = [];
+    if($c && $c->stash->{'remote_user'}) {
+        my $cache = $c->cache->get->{'users'}->{$c->stash->{'remote_user'}};
+        $groups = [sort keys %{$cache->{'contactgroups'}}] if($cache && $cache->{'contactgroups'});
+    }
+    local $ENV{REMOTE_USER_GROUPS} = join(';', @{$groups}) if $c;
+    local $ENV{REMOTE_USER_EMAIL} = $c->user->{'email'} if $c && $c->user;
+    local $ENV{REMOTE_USER_ALIAS} = $c->user->{'alias'} if $c && $c->user;
+
+    if($detached) {
+        confess("stdin not supported for detached commands") if $stdin;
+        confess("array cmd not supported for detached commands") if ref $cmd eq 'ARRAY';
+        require Thruk::Utils::External;
+        Thruk::Utils::External::perl($c, { expr => '`'.$cmd.'`', background => 1 });
+        return(0, "cmd started in background");
+    }
+
     my($rc, $output);
     if(ref $cmd eq 'ARRAY') {
         my $prog = shift @{$cmd};
@@ -301,10 +326,14 @@ sub cmd {
             CORE::close($wtr);
         }
         while(POSIX::waitpid($pid, WNOHANG) == 0) {
-            push @lines, <$rdr>;
+            my @line = <$rdr>;
+            push @lines, @line;
+            print $print_prefix.join($print_prefix, @line) if defined $print_prefix;
         }
         $rc = $?;
-        push @lines, <$rdr>;
+        my @line = <$rdr>;
+        push @lines, @line;
+        print $print_prefix.join($print_prefix, @line) if defined $print_prefix;
         chomp($output = join('', @lines) || '');
         # restore original array
         unshift @{$cmd}, $prog;
@@ -312,8 +341,19 @@ sub cmd {
         confess("stdin not supported for string commands") if $stdin;
         #&timing_breakpoint('IO::cmd: '.$cmd);
         $c->log->debug( "running cmd: ". $cmd ) if $c;
-        $output = `$cmd 2>&1`;
+        local $SIG{CHLD} = 'IGNORE' if $cmd =~ m/&\s*$/mx;
+
+        # background process?
+        if($cmd =~ m/&\s*$/mx) {
+            if($cmd !~ m|2>&1|mx) {
+                $c->log->warn(longmess("cmd does not redirect output but wants to run in the background, add >/dev/null 2>&1 to: ".$cmd)) if $c;
+            }
+        }
+
+        $output = `$cmd`;
         $rc = $?;
+        # rc will be -1 otherwise when ignoring SIGCHLD
+        $rc = 0 if($rc == -1 && $SIG{CHLD} eq 'IGNORE');
     }
     if($rc == -1) {
         $output .= "[".$!."]";

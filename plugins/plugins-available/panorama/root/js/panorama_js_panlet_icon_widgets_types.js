@@ -113,12 +113,14 @@ Ext.define('TP.HostgroupStatusIcon', {
                 this.xdata.general.incl_svc = true;
                 this.xdata.general.incl_hst = true;
             }
+            var tab = Ext.getCmp(this.panel_id);
             var res = TP.get_group_status({
                 group:          this.hostgroup,
                 incl_ack:       this.xdata.general.incl_ack,
                 incl_downtimes: this.xdata.general.incl_downtimes,
                 incl_svc:       this.xdata.general.incl_svc,
-                incl_hst:       this.xdata.general.incl_hst
+                incl_hst:       this.xdata.general.incl_hst,
+                order:          tab.xdata.state_order
             });
             newStatus         = res.state;
             this.downtime     = res.downtime;
@@ -255,12 +257,14 @@ Ext.define('TP.ServicegroupStatusIcon', {
     refreshHandler: function(newStatus) {
         // calculate summarized status
         if(this.servicegroup) {
+            var tab = Ext.getCmp(this.panel_id);
             var res = TP.get_group_status({
                 group:          this.servicegroup,
                 incl_ack:       this.xdata.general.incl_ack,
                 incl_downtimes: this.xdata.general.incl_downtimes,
                 incl_svc:       true,
-                incl_hst:       false
+                incl_hst:       false,
+                order:          tab.xdata.state_order
             });
             newStatus         = res.state;
             this.downtime     = res.downtime;
@@ -347,12 +351,14 @@ Ext.define('TP.FilterStatusIcon', {
     refreshHandler: function(newStatus) {
         // calculate summarized status
         if(this.results) {
+            var tab = Ext.getCmp(this.panel_id);
             var res = TP.get_group_status({
                 group:          this.results,
                 incl_ack:       this.xdata.general.incl_ack,
                 incl_downtimes: this.xdata.general.incl_downtimes,
                 incl_svc:       this.xdata.general.incl_svc,
-                incl_hst:       this.xdata.general.incl_hst
+                incl_hst:       this.xdata.general.incl_hst,
+                order:          tab.xdata.state_order
             });
             newStatus         = res.state;
             this.downtime     = res.downtime;
@@ -399,7 +405,6 @@ Ext.define('TP.SiteStatusIcon', {
     iconType: 'site',
     iconName: 'Sitename',
     initComponent: function() {
-        var panel = this;
         this.callParent();
     },
     getGeneralItems: function() {
@@ -526,10 +531,11 @@ Ext.define('TP.StaticIcon', {
                     return(true);
                 },
                 change: function() {
-                if(TP.iconSettingsWindow.renderUpdate) {
-                    TP.iconSettingsWindow.renderUpdate();
+                    if(TP.iconSettingsGlobals.renderUpdate) {
+                        TP.iconSettingsGlobals.renderUpdate();
+                    }
                 }
-            }}
+            }
         }, {
             xtype:      'panel',
             html:       'Place images in: '+usercontent_folder+'/images/ <a href="#" onclick="TP.uploadUserContent(\'image\', \'images/\')">(upload)</a>',
@@ -652,7 +658,7 @@ Ext.define('TP.DashboardStatusIcon', {
             panels = panels.sort(function(a,b) { return(a.iconType > b.iconType) });
             for(var nr=0; nr<panels.length; nr++) {
                 var p = panels[nr];
-                if(p.iconType && p.xdata) {
+                if(p.iconType && p.xdata && p.iconType != "text" && p.iconType != "image") {
                     if(this.xdata.state <= p.xdata.state         /* show only problems if the map has one */
                        && (this.xdata.state == 0 || p.xdata.state != 4) /* skip pending icons if there is a problem */
                        && (!this.hostProblem || (p.hostProblem || p.iconType == 'host')) /* if the map is a hostproblem, show only hosts */
@@ -699,7 +705,20 @@ Ext.define('TP.DashboardStatusIcon', {
                 This.callParent([newStatus]);
                 return;
             }
-            TP.add_pantab(tab_id, undefined, true, Ext.bind(This.refreshHandler, This, [newStatus, skipUpdate]));
+            TP.add_pantab(tab_id, undefined, true, function(id, success, response) {
+                if(success) {
+                    This.refreshHandler(newStatus, skipUpdate);
+                } else {
+                    // pass unknown state back to the parent
+                    This.downtime     = false;
+                    This.acknowledged = false;
+                    This.hostProblem  = false;
+                    This.xdata.state  = 3;
+                    newStatus         = 3;
+                    skipUpdate        = true;
+                    This.refreshHandler(newStatus, skipUpdate);
+                }
+            });
             return;
         }
         if(tab.rendered) { skipUpdate = true; }
